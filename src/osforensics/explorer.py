@@ -208,11 +208,12 @@ def _perm_str(st_mode: int) -> str:
 def browse(fs: FilesystemAccessor, path: str) -> Dict:
     """List a directory. Returns metadata for each child entry."""
     children = []
-    names = fs.list_dir(path)
-    for name in sorted(names):
-        child_path = path.rstrip("/") + "/" + name
-        entry: Dict = {"name": name, "path": child_path}
-        if fs.mode == "local":
+
+    if fs.mode == "local":
+        names = fs.list_dir(path)
+        for name in sorted(names):
+            child_path = path.rstrip("/") + "/" + name
+            entry: Dict = {"name": name, "path": child_path}
             full = fs._local_full(child_path)
             try:
                 st = os.lstat(full)
@@ -237,10 +238,57 @@ def browse(fs: FilesystemAccessor, path: str) -> Dict:
                         pass
             except OSError:
                 entry.update({"type": "unknown", "is_dir": False})
-        else:
-            # TSK mode — limited metadata
-            entry.update({"type": "unknown", "is_dir": False, "size": 0})
-        children.append(entry)
+            children.append(entry)
+    else:
+        # TSK mode — iterate the directory via pytsk3 to collect metadata in one pass
+        try:
+            import pytsk3 as _pytsk3
+            dir_obj = fs.fs.open_dir(path)
+            for direntry in dir_obj:
+                if not hasattr(direntry, "info") or direntry.info is None:
+                    continue
+                name_info = getattr(direntry.info, "name", None)
+                if name_info is None:
+                    continue
+                name = name_info.name
+                if isinstance(name, bytes):
+                    name = name.decode("utf-8", errors="replace")
+                if name in (".", ".."):
+                    continue
+                child_path = path.rstrip("/") + "/" + name
+                entry: Dict = {"name": name, "path": child_path}
+                meta_info = getattr(direntry.info, "meta", None)
+                if meta_info is not None:
+                    is_dir = (meta_info.type == _pytsk3.TSK_FS_META_TYPE_DIR)
+                    ftype = "directory" if is_dir else "regular"
+                    size = int(meta_info.size) if meta_info.size else 0
+                    entry.update({
+                        "type":       ftype,
+                        "size":       size,
+                        "size_human": _humansize(size),
+                        "is_dir":     is_dir,
+                        "uid":        int(meta_info.uid) if meta_info.uid is not None else None,
+                        "gid":        int(meta_info.gid) if meta_info.gid is not None else None,
+                        "inode":      int(meta_info.addr) if hasattr(meta_info, "addr") else None,
+                    })
+                    for ts_attr in ("mtime", "atime", "ctime"):
+                        ts_val = getattr(meta_info, ts_attr, None)
+                        if ts_val:
+                            try:
+                                entry[ts_attr] = _epoch_str(float(ts_val))
+                            except Exception:
+                                pass
+                else:
+                    entry.update({"type": "unknown", "is_dir": False, "size": 0})
+                children.append(entry)
+        except ImportError:
+            pass
+        except Exception:
+            names = fs.list_dir(path)
+            for name in names:
+                child_path = path.rstrip("/") + "/" + name
+                children.append({"name": name, "path": child_path,
+                                  "type": "unknown", "is_dir": False, "size": 0})
 
     # Directories first, then files, both alpha-sorted
     children.sort(key=lambda e: (0 if e.get("is_dir") else 1, e["name"].lower()))
@@ -283,7 +331,40 @@ def stat_file(fs: FilesystemAccessor, path: str) -> Dict:
         except OSError as e:
             result["error"] = str(e)
     else:
-        result["error"] = "TSK mode stat not implemented"
+        # TSK mode — use pytsk3 metadata when available
+        try:
+            import pytsk3 as _pytsk3
+            f = fs.fs.open(path)
+            meta_info = f.info.meta
+            if meta_info is not None:
+                is_dir = (meta_info.type == _pytsk3.TSK_FS_META_TYPE_DIR)
+                ftype = "directory" if is_dir else "regular"
+                size = int(meta_info.size) if meta_info.size else 0
+                result.update({
+                    "exists":     True,
+                    "type":       ftype,
+                    "size":       size,
+                    "size_human": _humansize(size),
+                    "is_dir":     is_dir,
+                    "uid":        int(meta_info.uid) if meta_info.uid is not None else None,
+                    "gid":        int(meta_info.gid) if meta_info.gid is not None else None,
+                    "inode":      int(meta_info.addr) if hasattr(meta_info, "addr") else None,
+                    "mode":       oct(int(meta_info.mode)) if meta_info.mode else None,
+                })
+                for ts_attr in ("mtime", "atime", "ctime"):
+                    ts_val = getattr(meta_info, ts_attr, None)
+                    if ts_val:
+                        try:
+                            result[ts_attr] = _epoch_str(float(ts_val))
+                        except Exception:
+                            pass
+            else:
+                result.update({"exists": True, "type": "unknown", "is_dir": False,
+                               "size": 0, "size_human": "0 B"})
+        except ImportError:
+            result["error"] = "pytsk3 not available"
+        except Exception as e:
+            result["error"] = str(e)
     return result
 
 
@@ -293,31 +374,42 @@ _TEXT_LIMIT = 200_000   # 200 KB max for viewer
 def read_text(fs: FilesystemAccessor, path: str, limit: int = _TEXT_LIMIT) -> Dict:
     """Read up to `limit` bytes of a file and decode as UTF-8 for display."""
     meta = stat_file(fs, path)
-    if not meta.get("exists"):
-        return {"path": path, "exists": False, "content": None, "truncated": False,
-                "size": 0, "encoding": "utf-8", "error": meta.get("error", "File not found")}
 
-    if meta.get("is_dir"):
-        return {"path": path, "exists": True, "is_dir": True, "content": None,
-                "truncated": False, "size": 0, "encoding": "utf-8"}
+    if fs.mode == "local":
+        # In local mode, rely on stat to verify existence
+        if not meta.get("exists"):
+            return {"path": path, "exists": False, "content": None, "truncated": False,
+                    "size": 0, "encoding": "utf-8", "error": meta.get("error", "File not found")}
+        if meta.get("is_dir"):
+            return {"path": path, "exists": True, "is_dir": True, "content": None,
+                    "truncated": False, "size": 0, "encoding": "utf-8"}
+    else:
+        # TSK mode: stat may be incomplete — check for directory, but still
+        # attempt to read even if stat reports the file as non-existent.
+        if meta.get("exists") and meta.get("is_dir"):
+            return {"path": path, "exists": True, "is_dir": True, "content": None,
+                    "truncated": False, "size": 0, "encoding": "utf-8"}
+        if not meta.get("exists"):
+            meta = {}   # stat unavailable; proceed to direct read attempt
 
     raw = fs.read_file(path, max_bytes=limit + 1)
     if raw is None:
-        return {"path": path, "exists": True, "content": None, "truncated": False,
-                "size": 0, "encoding": "utf-8", "error": "Permission denied or unreadable"}
+        return {"path": path, "exists": False, "content": None, "truncated": False,
+                "size": 0, "encoding": "utf-8", "error": "File not found or not readable"}
 
     truncated = len(raw) > limit
     raw = raw[:limit]
+    sz = meta.get("size", len(raw))
 
     # Detect binary: look for null bytes in first 8 KB
     is_binary = b"\x00" in raw[:8192]
     if is_binary:
         preview = raw[:512].hex(" ", 1)  # hex preview
         return {"path": path, "exists": True, "content": preview, "truncated": truncated,
-                "size": meta.get("size", 0), "encoding": "hex", "is_binary": True, **meta}
+                "size": sz, "encoding": "hex", "is_binary": True, **meta}
 
     content = raw.decode("utf-8", errors="replace")
     return {
         "path": path, "exists": True, "content": content, "truncated": truncated,
-        "size": meta.get("size", 0), "encoding": "utf-8", "is_binary": False, **meta,
+        "size": sz, "encoding": "utf-8", "is_binary": False, **meta,
     }

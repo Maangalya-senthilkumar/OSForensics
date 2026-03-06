@@ -647,12 +647,97 @@ function PaneDivider({ onDrag }) {
   return <div className="pane-divider" onMouseDown={onMouseDown} />;
 }
 
+
+// ─── Plain File-System Directory Tree ───────────────────────────────────────
+// Lazily loads subdirectories on expand. Works with apiBrowse.
+function FsDirTreeNode({ imgPath, path, name, depth, selectedPath, onSelect }) {
+  const [expanded, setExpanded] = useState(depth === 0);
+  const [children, setChildren] = useState(null);  // null = not yet loaded
+  const [loading, setLoading]   = useState(false);
+
+  async function toggle(e) {
+    e.stopPropagation();
+    if (!expanded && children === null) {
+      setLoading(true);
+      try {
+        const dir = await apiBrowse(imgPath, path);
+        setChildren(dir.children.filter(c => c.is_dir));
+      } catch (_) {
+        setChildren([]);
+      } finally {
+        setLoading(false);
+      }
+    }
+    setExpanded(v => !v);
+  }
+
+  const isSelected = selectedPath === path;
+
+  return (
+    <div className="fs-tree-node-wrap">
+      <div
+        className={`fs-tree-node ${isSelected ? "selected" : ""}`}
+        style={{ paddingLeft: 6 + depth * 14 }}
+        onClick={() => onSelect({ path, name, is_dir: true })}
+      >
+        <span className="fs-tree-expand" onClick={toggle}>
+          {loading
+            ? <RefreshCw size={10} className="spin" />
+            : (expanded
+                ? <ChevronDown size={10} />
+                : <ChevronRight size={10} />)}
+        </span>
+        <Folder size={11} style={{ color: "#eab308", flexShrink: 0 }} />
+        <span className="fs-tree-label" title={path}>{name}</span>
+      </div>
+      {expanded && children != null && children.map(child => (
+        <FsDirTreeNode
+          key={child.path}
+          imgPath={imgPath}
+          path={child.path}
+          name={child.name}
+          depth={depth + 1}
+          selectedPath={selectedPath}
+          onSelect={onSelect}
+        />
+      ))}
+    </div>
+  );
+}
+
+// Root mounts to show at the top of the plain explorer tree
+const FS_ROOTS = ["/", "/etc", "/var", "/home", "/root", "/tmp", "/opt", "/usr"];
+
+function FsDirTree({ imgPath, selectedPath, onSelect }) {
+  return (
+    <div className="fs-dir-tree">
+      {FS_ROOTS.map(r => (
+        <FsDirTreeNode
+          key={r}
+          imgPath={imgPath}
+          path={r}
+          name={r === "/" ? "/ (root)" : r}
+          depth={0}
+          selectedPath={selectedPath}
+          onSelect={onSelect}
+        />
+      ))}
+    </div>
+  );
+}
+
 // ─── Full Explorer (3-pane) ───────────────────────────────────────────────────
 function Explorer({ imgPath }) {
+  // "artifact" = category-based tree  |  "files" = plain directory browser
+  const [explorerMode, setExplorerMode] = useState("artifact");
+
+  // ── Artifact mode state ──
   const [tree, setTree]             = useState(null);
   const [treeErr, setTreeErr]       = useState(null);
   const [expandedIds, setExpanded]  = useState(new Set(["os", "logs", "shell_history"]));
   const [selectedNode, setSelNode]  = useState(null);
+
+  // ── Shared state (both modes use these) ──
   const [browseEntries, setBrowse]  = useState(null);
   const [browseLoading, setBrowseL] = useState(false);
   const [browsePath, setBrowsePath] = useState(null);
@@ -661,7 +746,10 @@ function Explorer({ imgPath }) {
   const [treeWidth, setTreeWidth]   = useState(230);
   const [metaWidth, setMetaWidth]   = useState(300);
 
-  // Load tree once
+  // ── Files mode state ──
+  const [fsTreeSel, setFsTreeSel]   = useState(null);  // currently selected dir in fs tree
+
+  // Load artifact tree once
   useEffect(() => {
     apiTree()
       .then(d => setTree(d.tree))
@@ -679,13 +767,9 @@ function Explorer({ imgPath }) {
   async function selectNode(node) {
     setSelNode(node);
     setSelFile(null);
-
-    if (!node.path) return; // grouping node, no path
-
+    if (!node.path) return;
     setBrowseL(true); setBrowse(null); setBrowsePath(node.path);
     setNavStack([node.path]);
-
-    // Determine if it's a dir or file
     try {
       const meta = await apiStat(imgPath, node.path);
       if (meta.is_dir) {
@@ -693,7 +777,6 @@ function Explorer({ imgPath }) {
         setBrowse(dir.children);
         setSelFile(meta);
       } else {
-        // Leaf file: show only the file itself in file list so user can click
         setBrowse([{ name: node.path.split("/").pop(), path: node.path, type: meta.type, ...meta }]);
         setSelFile(meta);
       }
@@ -704,32 +787,36 @@ function Explorer({ imgPath }) {
     }
   }
 
+  async function selectFsDir(entry) {
+    setFsTreeSel(entry.path);
+    setSelFile(null);
+    setBrowseL(true); setBrowse(null); setBrowsePath(entry.path);
+    setNavStack([entry.path]);
+    try {
+      const dir = await apiBrowse(imgPath, entry.path);
+      setBrowse(dir.children);
+    } catch (_) {
+      setBrowse([]);
+    } finally {
+      setBrowseL(false);
+    }
+  }
+
   async function openEntry(entry, navigate = false) {
     setSelFile(null);
-
-    // Fetch stat
     let meta;
-    try {
-      meta = await apiStat(imgPath, entry.path);
-    } catch (e) {
-      meta = entry;
-    }
-
+    try { meta = await apiStat(imgPath, entry.path); }
+    catch (_) { meta = entry; }
     setSelFile({ ...entry, ...meta });
-
     if (meta.is_dir && navigate) {
-      // Navigate into directory
       setBrowseL(true);
       setBrowsePath(entry.path);
       setNavStack(prev => [...prev, entry.path]);
       try {
         const dir = await apiBrowse(imgPath, entry.path);
         setBrowse(dir.children);
-      } catch (e) {
-        setBrowse([]);
-      } finally {
-        setBrowseL(false);
-      }
+      } catch (_) { setBrowse([]); }
+      finally { setBrowseL(false); }
     }
   }
 
@@ -743,28 +830,67 @@ function Explorer({ imgPath }) {
     try {
       const dir = await apiBrowse(imgPath, parentPath);
       setBrowse(dir.children);
-    } catch (e) { setBrowse([]); }
+    } catch (_) { setBrowse([]); }
     finally { setBrowseL(false); }
   }
 
+  // When switching modes, clear shared browse state
+  function switchMode(mode) {
+    setExplorerMode(mode);
+    setBrowse(null);
+    setBrowsePath(null);
+    setNavStack([]);
+    setSelFile(null);
+    setSelNode(null);
+    setFsTreeSel(null);
+  }
+
   const clampTree = (w) => Math.max(140, Math.min(520, w));
-  const clampMeta  = (w) => Math.max(180, Math.min(620, w));
+  const clampMeta = (w) => Math.max(180, Math.min(620, w));
 
   return (
     <div className="explorer-shell">
-      {/* Left: tree */}
+      {/* Left: tree pane */}
       <div className="explorer-tree-pane" style={{ width: treeWidth }}>
-        <div className="explorer-pane-header">
-          <FolderOpenIcon size={12} /> Artifact Tree
+        <div className="explorer-pane-header" style={{ gap: 4 }}>
+          {explorerMode === "artifact"
+            ? <><FolderOpenIcon size={12} /> Artifact Tree</>
+            : <><Folder size={12} /> File System</>}
+          <div className="explorer-mode-toggle">
+            <button
+              className={`mode-toggle-btn ${explorerMode === "artifact" ? "active" : ""}`}
+              onClick={() => switchMode("artifact")}
+              title="Category artifact view"
+            >
+              <LayoutPanelLeft size={11} />
+            </button>
+            <button
+              className={`mode-toggle-btn ${explorerMode === "files" ? "active" : ""}`}
+              onClick={() => switchMode("files")}
+              title="Plain filesystem browser"
+            >
+              <Folder size={11} />
+            </button>
+          </div>
         </div>
         <div className="explorer-tree-scroll">
-          {treeErr && <div className="dlg-error" style={{ margin: 8, fontSize: 11 }}>{treeErr}</div>}
-          {!tree && !treeErr && <div className="pane-loading"><RefreshCw size={12} className="spin" />Loading…</div>}
-          {tree?.map(node => (
-            <TreeNode key={node.id} node={node}
-              onSelect={selectNode} selectedId={selectedNode?.id}
-              expandedIds={expandedIds} onToggle={toggleExpand} />
-          ))}
+          {explorerMode === "artifact" ? (
+            <>
+              {treeErr && <div className="dlg-error" style={{ margin: 8, fontSize: 11 }}>{treeErr}</div>}
+              {!tree && !treeErr && <div className="pane-loading"><RefreshCw size={12} className="spin" />Loading…</div>}
+              {tree?.map(node => (
+                <TreeNode key={node.id} node={node}
+                  onSelect={selectNode} selectedId={selectedNode?.id}
+                  expandedIds={expandedIds} onToggle={toggleExpand} />
+              ))}
+            </>
+          ) : (
+            <FsDirTree
+              imgPath={imgPath}
+              selectedPath={fsTreeSel}
+              onSelect={selectFsDir}
+            />
+          )}
         </div>
       </div>
 
@@ -1748,7 +1874,7 @@ const REPORT_TABS = [
   { id: "tools",       label: "Tools",       Icon: Search    },
 ];
 
-function ReportPanel({ report, onClear, onExport }) {
+function ReportPanel({ report, onClear, onExport, onReanalyze, reanalyzing }) {
   const [tab, setTab] = useState("summary");
   const { summary } = report;
   const badge = {
@@ -1769,6 +1895,9 @@ function ReportPanel({ report, onClear, onExport }) {
           )}
         </div>
         <div style={{ display: "flex", gap: 6 }}>
+          <button className="btn-secondary btn-sm" onClick={onReanalyze} disabled={reanalyzing} title="Re-run analysis on the same image">
+            <RefreshCw size={12} className={reanalyzing ? "spin" : ""} /> {reanalyzing ? "Analyzing…" : "Reanalyze"}
+          </button>
           <button className="btn-secondary btn-sm" onClick={onExport}><FolderOpen size={12} /> Export</button>
           <button className="btn-secondary btn-sm" onClick={onClear}><Trash2 size={12} /> Clear</button>
         </div>
@@ -2191,6 +2320,7 @@ export default function App() {
   const [status,      setStatus]      = useState("Ready");
   const [toolbar,     setToolbar]     = useState(true);
   const [statbar,     setStatbar]     = useState(true);
+  const [reanalyzing, setReanalyzing] = useState(false);
   // "home" | "cases" | "case" | "explorer" | "report"
   const [view,        setView]        = useState("home");
   const [activeCase,  setActiveCase]  = useState(null);
@@ -2208,6 +2338,21 @@ export default function App() {
       `${r.summary?.timeline_events ?? 0} timeline event(s), ` +
       `${hi} high-severity indicator${hi !== 1 ? "s" : ""}`
     );
+  }
+
+  async function handleReanalyze() {
+    if (!imgPath || reanalyzing) return;
+    setReanalyzing(true);
+    setStatus("Reanalyzing…");
+    try {
+      const r = await apiAnalyze(imgPath);
+      handleResult(r, imgPath);
+      setStatus(`Reanalysis complete — ${r.summary?.total_high ?? 0} high-severity indicator(s)`);
+    } catch (e) {
+      setStatus(`Reanalyze failed: ${e.message}`);
+    } finally {
+      setReanalyzing(false);
+    }
   }
 
   function handleSourceAdded(updatedCase, source, rpt) {
@@ -2327,6 +2472,8 @@ export default function App() {
               report={report}
               onClear={() => handleAction("clear")}
               onExport={() => downloadJSON(report)}
+              onReanalyze={handleReanalyze}
+              reanalyzing={reanalyzing}
             />
           )}
         </div>
