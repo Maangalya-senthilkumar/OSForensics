@@ -1218,6 +1218,8 @@ function BashAnalysisView({ events }) {
   const [section,    setSection]    = useState("suspicious");
   const [userFilter, setUserFilter] = useState("all");
   const [search,     setSearch]     = useState("");
+  const [navWidth,   setNavWidth]   = useState(180);
+  const clampNav = (w) => Math.max(120, Math.min(320, w));
 
   const allUsers  = [...new Set(events.map(e => e.data?.user).filter(Boolean))];
   const rawEvents = events.filter(e => e.event_type === "bash_history_raw");
@@ -1275,8 +1277,8 @@ function BashAnalysisView({ events }) {
       </div>
 
       <div className="bh-sub-layout">
-        {/* Left sub-sidebar */}
-        <nav className="bh-sub-nav">
+        {/* Left sub-sidebar — resizable */}
+        <nav className="bh-sub-nav" style={{ width: navWidth }}>
           {navItems.map(({ id, label, Icon, count, sev: s }) => (
             <button key={id}
               className={`bh-sub-nav-btn ${section === id ? "active" : ""}`}
@@ -1285,13 +1287,15 @@ function BashAnalysisView({ events }) {
               <span className="bh-sub-nav-label">{label}</span>
               {count != null && count > 0 && (
                 <span className="bh-sub-nav-badge"
-                  style={{ background: s ? SEV_COLOR[s] : undefined }}>
+                  style={{ background: s ? SEV_COLOR[s] : undefined, color: s ? "#fff" : undefined }}>
                   {count}
                 </span>
               )}
             </button>
           ))}
         </nav>
+
+        <PaneDivider onDrag={(dx) => setNavWidth(w => clampNav(w + dx))} />
 
         {/* Right content */}
         <div className="bh-sub-content">

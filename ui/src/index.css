@@ -2135,7 +2135,7 @@ kbd {
 }
 
 /* Analysis view toolbar */
-.bh-analysis { display: flex; flex-direction: column; gap: 8px; }
+.bh-analysis { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
 .bh-toolbar {
   display: flex;
   align-items: center;
@@ -2170,15 +2170,18 @@ kbd {
   border-radius: 8px;
   overflow: hidden;
   background: #fff;
+  flex: 1;
 }
 .bh-sub-nav {
-  width: 180px;
+  /* width is controlled by inline style (resizable) — default 180px */
   flex-shrink: 0;
   background: #f8fafc;
   border-right: 1px solid var(--border-lt);
   display: flex;
   flex-direction: column;
   padding: 6px 0;
+  overflow-y: auto;
+  min-width: 120px;
 }
 .bh-sub-nav-btn {
   display: flex;
