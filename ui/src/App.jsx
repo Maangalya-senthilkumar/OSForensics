@@ -6,7 +6,7 @@ import {
   Lock, Server, Key, Folder, FolderOpen as FolderOpenIcon, FileText,
   Wifi, Package, List, Database, Cpu, Box, Globe, Users, ChevronUp,
   File, Code, RefreshCw, Info, LayoutPanelLeft, BarChart2, Home,
-  BookOpen, Plus,
+  BookOpen, Plus, Filter,
 } from "lucide-react";
 
 // ─── API ──────────────────────────────────────────────────────────────────────
@@ -44,8 +44,8 @@ const apiCaseAnalyze = (caseId, imgPath) => post(`/cases/${caseId}/analyze`, { i
 const apiCaseDelSrc  = (caseId, srcId)   => fetch(`${API}/cases/${caseId}/sources/${srcId}`, { method: "DELETE" }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 
 // ─── Severity / icon helpers ──────────────────────────────────────────────────
-const SEV_COLOR = { high: "#dc2626", medium: "#d97706", low: "#16a34a", info: "#2563eb" };
-const SEV_BG    = { high: "#fff1f0", medium: "#fffbeb", low: "#f0fdf4", info: "#eff6ff" };
+const SEV_COLOR = { critical: "#7f1d1d", high: "#dc2626", medium: "#d97706", low: "#16a34a", info: "#2563eb" };
+const SEV_BG    = { critical: "#fef2f2", high: "#fff1f0", medium: "#fffbeb", low: "#f0fdf4", info: "#eff6ff" };
 
 function SevBadge({ sev }) {
   const s = (sev || "info").toLowerCase();
@@ -877,42 +877,790 @@ function SummaryTab({ report }) {
   );
 }
 
-function TimelineTab({ events = [] }) {
-  const [filter, setFilter] = useState("all");
-  const [search, setSearch] = useState("");
-  if (events.length === 0) return <EmptyState icon={Clock} message="No timeline events found." />;
-  const counts = events.reduce((acc, e) => { acc[e.severity] = (acc[e.severity] || 0) + 1; return acc; }, {});
-  const filtered = events.filter(e => {
-    if (filter !== "all" && e.severity !== filter) return false;
-    if (search && !e.detail.toLowerCase().includes(search.toLowerCase())) return false;
-    return true;
-  });
+// ── Timeline event-type metadata ─────────────────────────────────────────────
+const ET_META = {
+  attack_chain:             { label: "Attack Chains",     Icon: AlertTriangle },
+  suspicious_command:       { label: "Suspicious Cmds",   Icon: Terminal      },
+  anti_forensics:           { label: "Anti-Forensics",    Icon: Shield        },
+  activity_profile:         { label: "Activity Profile",  Icon: BarChart2     },
+  session_summary:          { label: "Sessions",          Icon: Clock         },
+  frequency_analysis:       { label: "Frequency",         Icon: Activity      },
+  timestamp_reconstruction: { label: "Timestamps",        Icon: Info          },
+  file_modified:            { label: "File Changes",      Icon: FileText      },
+  log_event:                { label: "Log Events",        Icon: Server        },
+};
+
+// ── Per-type card renderers ───────────────────────────────────────────────────
+function AttackChainCard({ ev }) {
+  const [expanded, setExpanded] = useState(false);
+  const d = ev.data || {};
+  const steps = d.steps || [];
+  const lineNos = d.step_line_nos || [];
+  const c = SEV_COLOR[ev.severity] || "#7f1d1d";
+  const bg = SEV_BG[ev.severity]   || "#fef2f2";
   return (
-    <div className="tab-content">
-      <div className="tl-toolbar">
-        <div className="tl-filters">
-          {["all", "high", "medium", "info"].map(f => (
-            <button key={f} className={`tl-filter-btn ${filter === f ? "active" : ""}`} onClick={() => setFilter(f)}>
-              {f === "all" ? `All (${events.length})` : `${f} (${counts[f] || 0})`}
-            </button>
+    <div className="tl-card" style={{ borderLeft: `4px solid ${c}`, background: bg }}>
+      <div className="tl-card-header">
+        <AlertTriangle size={14} style={{ color: c, flexShrink: 0 }} />
+        <span className="tl-card-title" style={{ color: c }}>Attack Chain Detected</span>
+        <span className="tl-card-user">{d.user || ""}</span>
+        <SevBadge sev={ev.severity} />
+        <span className="tl-ts-inline">{ev.timestamp !== "unknown" ? ev.timestamp : ""}</span>
+        {steps.length > 0 && (
+          <button className="tl-expand-btn" onClick={() => setExpanded(v => !v)}>
+            {expanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+            {expanded ? "Collapse" : "Expand steps"}
+          </button>
+        )}
+      </div>
+      <div className="tl-chain-name">{d.chain || ev.detail}</div>
+      {/* Collapsed: inline step pills */}
+      {!expanded && steps.length > 0 && (
+        <div className="tl-chain-steps">
+          {steps.map((s, i) => (
+            <React.Fragment key={i}>
+              {i > 0 && <span className="tl-chain-arrow">→</span>}
+              <code className="tl-chain-step">{s}</code>
+            </React.Fragment>
           ))}
         </div>
-        <input className="tl-search" placeholder="Search events…" value={search} onChange={e => setSearch(e.target.value)} />
+      )}
+      {/* Expanded: table with line numbers */}
+      {expanded && steps.length > 0 && (
+        <table className="tl-chain-table">
+          <thead><tr><th>Step</th><th>Line #</th><th>Command</th></tr></thead>
+          <tbody>
+            {steps.map((s, i) => (
+              <tr key={i}>
+                <td className="tl-chain-step-no">Step {i + 1}</td>
+                <td className="tl-chain-line-no">{lineNos[i] != null ? `L${lineNos[i]}` : "—"}</td>
+                <td><code className="tl-chain-expanded-cmd">{s}</code></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function ActivityProfileCard({ ev }) {
+  const d = ev.data || {};
+  const cats = d.categories || [];
+  const HIGH_RISK_COLOR = "#dc2626";
+  const maxCount = cats.reduce((m, c) => Math.max(m, c.count), 0);
+  return (
+    <div className="tl-card tl-card-profile">
+      <div className="tl-card-header">
+        <BarChart2 size={14} style={{ color: "#7c3aed", flexShrink: 0 }} />
+        <span className="tl-card-title" style={{ color: "#7c3aed" }}>Activity Profile</span>
+        <span className="tl-card-user">{d.user || ""}</span>
+        <SevBadge sev={ev.severity} />
+      </div>
+      <div className="tl-profile-meta">{d.total || 0} commands &bull; {cats.length} categories &bull; Dominant: <strong style={{ color: d.high_risk_present ? HIGH_RISK_COLOR : undefined }}>{d.dominant}</strong></div>
+      <table className="tl-profile-table">
+        <thead>
+          <tr><th>Category</th><th>Count</th><th>%</th><th style={{ width: 100 }}>Bar</th></tr>
+        </thead>
+        <tbody>
+          {cats.map((cat) => (
+            <tr key={cat.name} style={{ background: cat.high_risk ? "#fff1f0" : undefined }}>
+              <td style={{ fontWeight: cat.high_risk ? 600 : undefined, color: cat.high_risk ? HIGH_RISK_COLOR : undefined }}>
+                {cat.high_risk && <AlertTriangle size={10} style={{ marginRight: 4, verticalAlign: "middle" }} />}
+                {cat.name}
+              </td>
+              <td style={{ textAlign: "right" }}>{cat.count}</td>
+              <td style={{ textAlign: "right", color: "#6b7280" }}>{cat.pct}%</td>
+              <td>
+                <div style={{ background: "#e5e7eb", borderRadius: 3, height: 6, overflow: "hidden" }}>
+                  <div style={{ width: `${Math.round(100 * cat.count / maxCount)}%`, height: "100%", background: cat.high_risk ? HIGH_RISK_COLOR : "#6366f1" }} />
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SuspiciousCommandCard({ ev }) {
+  const d = ev.data || {};
+  const c = SEV_COLOR[ev.severity] || "#d97706";
+  const bg = SEV_BG[ev.severity]   || "#fffbeb";
+  return (
+    <div className="tl-card" style={{ borderLeft: `3px solid ${c}`, background: bg }}>
+      <div className="tl-card-header">
+        <Terminal size={13} style={{ color: c, flexShrink: 0 }} />
+        {d.line_no != null && <span className="tl-lineno-badge">L{d.line_no}</span>}
+        <span className="tl-card-user">{d.user || ""}</span>
+        {d.category && d.category !== "General" && (
+          <span className="tl-cat-badge" style={{ background: c }}>{d.category}</span>
+        )}
+        <span className="tl-card-label">{d.label || "Suspicious command"}</span>
+        <SevBadge sev={ev.severity} />
+        <span className="tl-ts-inline">{ev.timestamp !== "unknown" ? ev.timestamp : ""}</span>
+      </div>
+      {d.command && <code className="tl-cmd-code">{d.command}</code>}
+    </div>
+  );
+}
+
+function FrequencyCard({ ev }) {
+  const d = ev.data || {};
+  const c = SEV_COLOR[ev.severity] || "#d97706";
+  return (
+    <div className="tl-card" style={{ borderLeft: `3px solid ${c}`, background: SEV_BG[ev.severity] || "#fffbeb" }}>
+      <div className="tl-card-header">
+        <Activity size={13} style={{ color: c, flexShrink: 0 }} />
+        <span className="tl-card-user">{d.user || ""}</span>
+        <code className="tl-freq-tool">{d.tool || ""}</code>
+        <span className="tl-freq-count" style={{ background: c }}>{d.count}×</span>
+        <span className="tl-card-label">repeated invocations — possible scripted use</span>
+        <SevBadge sev={ev.severity} />
+      </div>
+    </div>
+  );
+}
+
+function AntiForensicsCard({ ev }) {
+  return (
+    <div className="tl-card" style={{ borderLeft: `4px solid #dc2626`, background: "#fff1f0" }}>
+      <div className="tl-card-header">
+        <Shield size={14} style={{ color: "#dc2626", flexShrink: 0 }} />
+        <span className="tl-card-title" style={{ color: "#dc2626" }}>Anti-Forensics</span>
+        <SevBadge sev={ev.severity} />
+        <span className="tl-ts-inline">{ev.timestamp !== "unknown" ? ev.timestamp : ""}</span>
+      </div>
+      <div className="tl-card-label" style={{ color: "#7f1d1d" }}>{ev.detail}</div>
+    </div>
+  );
+}
+
+function GenericEventRow({ ev }) {
+  const Icon = SRC_ICON[ev.source] || (ET_META[ev.event_type]?.Icon) || Activity;
+  const c = SEV_COLOR[ev.severity] || "#6b7280";
+  return (
+    <div className="tl-row" style={{ borderLeft: `3px solid ${c}`, background: SEV_BG[ev.severity] || "#fff" }}>
+      <div className="tl-ts">{ev.timestamp !== "unknown" ? ev.timestamp : ""}</div>
+      <span className="tl-icon-wrap"><Icon size={13} style={{ color: c }} /></span>
+      <div className="tl-body">
+        <span className="tl-source">[{ev.source}]</span>
+        <span className="tl-detail">{ev.detail}</span>
+      </div>
+      <SevBadge sev={ev.severity} />
+    </div>
+  );
+}
+
+function renderTimelineEvent(ev, i) {
+  switch (ev.event_type) {
+    case "attack_chain":       return <AttackChainCard      key={i} ev={ev} />;
+    case "activity_profile":   return <ActivityProfileCard  key={i} ev={ev} />;
+    case "suspicious_command": return <SuspiciousCommandCard key={i} ev={ev} />;
+    case "frequency_analysis": return <FrequencyCard        key={i} ev={ev} />;
+    case "anti_forensics":     return <AntiForensicsCard    key={i} ev={ev} />;
+    default:                   return <GenericEventRow      key={i} ev={ev} />;
+  }
+}
+
+// ── Collapsible section wrapper ────────────────────────────────────────────
+function Section({ title, icon: Icon, count, severity, children, defaultOpen = true, empty }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const c = severity ? SEV_COLOR[severity] || "#6b7280" : "#6b7280";
+  return (
+    <div className="tl-section">
+      <button className="tl-section-hdr" onClick={() => setOpen(v => !v)}>
+        {Icon && <Icon size={13} style={{ color: c, flexShrink: 0 }} />}
+        <span className="tl-section-title">{title}</span>
+        {count != null && <span className="tl-section-count" style={{ background: severity ? c : undefined, color: severity ? "#fff" : undefined }}>{count}</span>}
+        <span style={{ marginLeft: "auto" }}>{open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}</span>
+      </button>
+      {open && (
+        <div className="tl-section-body">
+          {empty && count === 0 ? <div className="tl-empty-mini">{empty}</div> : children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Bash History: Analysis view ─────────────────────────────────────────────
+const BH_HIGH_RISK = new Set(["Reverse Shell","Exploitation","Credential Access","Privilege Escalation","Anti-Forensics","Exfiltration","Lateral Movement","Persistence"]);
+
+function BashAnalysisView({ events }) {
+  const [section,    setSection]    = useState("suspicious");
+  const [userFilter, setUserFilter] = useState("all");
+  const [search,     setSearch]     = useState("");
+
+  const allUsers  = [...new Set(events.map(e => e.data?.user).filter(Boolean))];
+  const rawEvents = events.filter(e => e.event_type === "bash_history_raw");
+
+  const visible = events.filter(e => {
+    if (e.event_type === "bash_history_raw") return false;
+    if (userFilter !== "all" && e.data?.user && e.data.user !== userFilter) return false;
+    if (section !== "frequency" && search && !e.detail.toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  });
+
+  const by  = (type) => visible.filter(e => e.event_type === type);
+  const sev = (evs)  => evs.some(e => e.severity === "critical") ? "critical"
+                      : evs.some(e => e.severity === "high")     ? "high" : "medium";
+
+  const chains   = by("attack_chain");
+  const suspCmds = by("suspicious_command");
+  const af       = by("anti_forensics");
+  const profiles = by("activity_profile");
+  const sessions = by("session_summary");
+  const other    = visible.filter(e =>
+    !["attack_chain","suspicious_command","anti_forensics","activity_profile",
+      "frequency_analysis","session_summary","timestamp_reconstruction"].includes(e.event_type)
+  );
+
+  const navItems = [
+    { id: "suspicious", label: "Suspicious Cmds",  Icon: Terminal,      count: suspCmds.length, sev: suspCmds.length ? sev(suspCmds) : null },
+    { id: "chains",     label: "Attack Chains",    Icon: AlertTriangle, count: chains.length,   sev: chains.length   ? sev(chains)   : null },
+    { id: "af",         label: "Anti-Forensics",   Icon: Shield,        count: af.length,       sev: af.length       ? "high"        : null },
+    { id: "frequency",  label: "Frequency",        Icon: BarChart2,     count: null },
+    { id: "profile",    label: "Activity Profile", Icon: Activity,      count: profiles.length },
+    { id: "sessions",   label: "Sessions",         Icon: Clock,         count: sessions.length },
+    ...(other.length > 0 ? [{ id: "other", label: "Other Events", Icon: Info, count: other.length }] : []),
+  ];
+
+  return (
+    <div className="bh-analysis">
+      <div className="bh-toolbar">
+        {allUsers.length > 1 && (
+          <div className="bh-user-pills">
+            {["all", ...allUsers].map(u => (
+              <button key={u} className={`bh-user-pill ${userFilter === u ? "active" : ""}`}
+                onClick={() => setUserFilter(u)}>
+                <Users size={10} style={{ marginRight: 3, verticalAlign: "middle" }} />
+                {u === "all" ? "All users" : u}
+              </button>
+            ))}
+          </div>
+        )}
+        {section !== "frequency" && (
+          <input className="tl-search" placeholder="Search events…" value={search}
+            onChange={e => setSearch(e.target.value)}
+            style={{ marginLeft: "auto", maxWidth: 240 }} />
+        )}
+      </div>
+
+      <div className="bh-sub-layout">
+        {/* Left sub-sidebar */}
+        <nav className="bh-sub-nav">
+          {navItems.map(({ id, label, Icon, count, sev: s }) => (
+            <button key={id}
+              className={`bh-sub-nav-btn ${section === id ? "active" : ""}`}
+              onClick={() => { setSection(id); setSearch(""); }}>
+              <Icon size={13} style={{ flexShrink: 0, color: s ? SEV_COLOR[s] : undefined }} />
+              <span className="bh-sub-nav-label">{label}</span>
+              {count != null && count > 0 && (
+                <span className="bh-sub-nav-badge"
+                  style={{ background: s ? SEV_COLOR[s] : undefined }}>
+                  {count}
+                </span>
+              )}
+            </button>
+          ))}
+        </nav>
+
+        {/* Right content */}
+        <div className="bh-sub-content">
+          {section === "suspicious" && (
+            suspCmds.length > 0
+              ? <SuspiciousCommandsPanel events={suspCmds} />
+              : <EmptyState icon={Terminal} message="No suspicious commands detected." />
+          )}
+          {section === "chains" && (
+            chains.length > 0
+              ? <div className="tl-list">{chains.map((ev, i) => <AttackChainCard key={i} ev={ev} />)}</div>
+              : <EmptyState icon={AlertTriangle} message="No attack chains detected." />
+          )}
+          {section === "af" && (
+            af.length > 0
+              ? <div className="tl-list">{af.map((ev, i) => <AntiForensicsCard key={i} ev={ev} />)}</div>
+              : <EmptyState icon={Shield} message="No anti-forensics activity detected." />
+          )}
+          {section === "frequency" && <FrequencyAnalysisPanel rawEvents={rawEvents} />}
+          {section === "profile" && (
+            profiles.length > 0
+              ? <div className="tl-list">{profiles.map((ev, i) => <ActivityProfileCard key={i} ev={ev} />)}</div>
+              : <EmptyState icon={Activity} message="No profile data." />
+          )}
+          {section === "sessions" && (
+            sessions.length > 0
+              ? <div className="tl-list">{sessions.map((ev, i) => <GenericEventRow key={i} ev={ev} />)}</div>
+              : <EmptyState icon={Clock} message="No sessions found." />
+          )}
+          {section === "other" && (
+            <div className="tl-list">{other.map((ev, i) => <GenericEventRow key={i} ev={ev} />)}</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ── Command category taxonomy for frequency analysis ─────────────────────────
+const CMD_TAXONOMY = [
+  { name: "File Operations", color: "#2563eb", risk: false, cmds: new Set(["ls","cp","mv","rm","mkdir","rmdir","touch","find","chmod","chown","chgrp","ln","rsync","scp","sftp","install","rename","stat","file"]) },
+  { name: "Text Processing", color: "#7c3aed", risk: false, cmds: new Set(["cat","grep","awk","sed","sort","uniq","wc","head","tail","less","more","cut","tr","diff","patch","echo","printf","tee","xargs","strings"]) },
+  { name: "Compression",     color: "#0891b2", risk: false, cmds: new Set(["tar","zip","unzip","gzip","gunzip","bzip2","xz","7z","zstd","ar","cpio","compress"]) },
+  { name: "Network",         color: "#059669", risk: false, cmds: new Set(["ping","traceroute","tracepath","curl","wget","ssh","ftp","nc","ncat","dig","host","nslookup","ip","ifconfig","netstat","ss","arp","route","mtr","whois"]) },
+  { name: "Process Mgmt",    color: "#6366f1", risk: false, cmds: new Set(["ps","top","htop","kill","pkill","killall","nice","renice","jobs","bg","fg","nohup","watch","timeout","strace","ltrace","lsof"]) },
+  { name: "System Info",     color: "#8b5cf6", risk: false, cmds: new Set(["uname","whoami","id","hostname","uptime","df","du","free","lscpu","lsblk","lshw","dmesg","journalctl","systemctl","service","mount","umount","env","printenv"]) },
+  { name: "Package Mgmt",    color: "#d97706", risk: false, cmds: new Set(["apt","apt-get","dpkg","yum","dnf","rpm","pacman","pip","pip3","npm","gem","cargo","go","snap","flatpak"]) },
+  { name: "Scripting",       color: "#f59e0b", risk: false, cmds: new Set(["python","python3","perl","ruby","bash","sh","zsh","fish","node","nodejs","php","lua"]) },
+  { name: "Reconnaissance",  color: "#dc2626", risk: true,  cmds: new Set(["nmap","masscan","zmap","nikto","gobuster","dirb","dirbuster","enum4linux","smbclient","rpcclient","ldapsearch","dnsenum","fierce","recon-ng","theharvester"]) },
+  { name: "Exploitation",    color: "#b91c1c", risk: true,  cmds: new Set(["msfconsole","msfvenom","sqlmap","hydra","medusa","john","hashcat","aircrack-ng","airmon-ng","airodump-ng","reaver","wifite"]) },
+  { name: "Privilege Esc.",  color: "#ef4444", risk: true,  cmds: new Set(["sudo","su","passwd","chpasswd","visudo","usermod","useradd","newgrp","pkexec"]) },
+  { name: "Anti-Forensics",  color: "#7f1d1d", risk: true,  cmds: new Set(["shred","wipe","srm","dd","secure-delete","bleachbit"]) },
+  { name: "Tunneling",       color: "#9f1239", risk: true,  cmds: new Set(["socat","chisel","ngrok","proxychains","tor","torsocks","stunnel","iodine","ptunnel","dns2tcp"]) },
+];
+
+function classifyCmd(cmdStr) {
+  const base = (cmdStr || "").trim().split(/\s+/)[0].replace(/^(?:\.\/|\/\S+\/)/, "");
+  for (const cat of CMD_TAXONOMY) {
+    if (cat.cmds.has(base)) return cat;
+  }
+  return { name: "General", color: "#6b7280", risk: false };
+}
+
+// ── Frequency Analysis Panel ──────────────────────────────────────────────────
+function FrequencyAnalysisPanel({ rawEvents }) {
+  const [viewMode, setViewMode] = useState("command");
+  const [topN,     setTopN]     = useState(20);
+
+  const allLines = rawEvents.flatMap(e => (e.data?.lines || []).map(l => ({ ...l, user: e.data?.user })));
+
+  if (!allLines.length)
+    return <EmptyState icon={BarChart2} message="No command history available for frequency analysis." />;
+
+  const totalCmds = allLines.length;
+
+  // By-command frequency
+  const cmdFreqMap = {};
+  for (const line of allLines) {
+    const base = (line.cmd || "").trim().split(/\s+/)[0].replace(/^(?:\.\/|\/\S+\/)/, "");
+    if (!base) continue;
+    if (!cmdFreqMap[base]) {
+      const cat = classifyCmd(line.cmd);
+      cmdFreqMap[base] = { count: 0, category: cat.name, risk: cat.risk, color: cat.color };
+    }
+    cmdFreqMap[base].count++;
+  }
+  const cmdRows = Object.entries(cmdFreqMap).sort((a, b) => b[1].count - a[1].count).slice(0, topN);
+  const maxCmd  = cmdRows[0]?.[1].count || 1;
+
+  // By-category frequency
+  const catFreqMap = {};
+  for (const line of allLines) {
+    const cat  = classifyCmd(line.cmd);
+    if (!catFreqMap[cat.name]) catFreqMap[cat.name] = { count: 0, color: cat.color, risk: cat.risk };
+    catFreqMap[cat.name].count++;
+  }
+  const catRows = Object.entries(catFreqMap).sort((a, b) => b[1].count - a[1].count);
+  const maxCat  = catRows[0]?.[1].count || 1;
+
+  return (
+    <div className="freq-panel">
+      <div className="freq-toolbar">
+        <div className="freq-mode-switch">
+          <button className={`freq-mode-btn ${viewMode === "command" ? "active" : ""}`}
+            onClick={() => setViewMode("command")}>
+            <Terminal size={12} style={{ marginRight: 5 }} />Raw Commands
+          </button>
+          <button className={`freq-mode-btn ${viewMode === "category" ? "active" : ""}`}
+            onClick={() => setViewMode("category")}>
+            <BarChart2 size={12} style={{ marginRight: 5 }} />By Category
+          </button>
+        </div>
+        {viewMode === "command" && (
+          <div className="freq-topn">
+            <span>Top:</span>
+            {[10, 20, 50].map(n => (
+              <button key={n} className={`freq-topn-btn ${topN === n ? "active" : ""}`}
+                onClick={() => setTopN(n)}>{n}</button>
+            ))}
+          </div>
+        )}
+        <span className="freq-total-stat">{totalCmds.toLocaleString()} commands total</span>
+      </div>
+
+      {viewMode === "command" && (
+        <div className="freq-chart">
+          <div className="freq-chart-header">
+            <span className="fch-cmd">Command</span>
+            <span className="fch-cat">Category</span>
+            <span className="fch-count">Count</span>
+            <span className="fch-pct">%</span>
+            <span className="fch-bar">Frequency</span>
+          </div>
+          {cmdRows.map(([cmd, info]) => {
+            const pct    = ((info.count / totalCmds) * 100).toFixed(1);
+            const barPct = Math.round((info.count / maxCmd) * 100);
+            return (
+              <div key={cmd} className={`freq-row ${info.risk ? "freq-row-risk" : ""}`}>
+                <code className="fch-cmd freq-cmd-code">{cmd}</code>
+                <span className="fch-cat freq-cat-tag" style={{ color: info.color }}>
+                  {info.risk && <AlertTriangle size={9} style={{ marginRight: 3, verticalAlign: "middle" }} />}
+                  {info.category}
+                </span>
+                <span className="fch-count freq-count-val" style={{ color: info.risk ? "#dc2626" : undefined }}>{info.count}</span>
+                <span className="fch-pct freq-pct-val">{pct}%</span>
+                <div className="fch-bar freq-bar-wrap">
+                  <div className="freq-bar-track">
+                    <div className="freq-bar-fill" style={{ width: `${barPct}%`, background: info.risk ? "#dc2626" : info.color }} />
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {viewMode === "category" && (
+        <div className="freq-chart">
+          <div className="freq-chart-header">
+            <span className="fch-catname">Category</span>
+            <span className="fch-risk">Risk</span>
+            <span className="fch-count">Count</span>
+            <span className="fch-pct">%</span>
+            <span className="fch-bar">Frequency</span>
+          </div>
+          {catRows.map(([cat, info]) => {
+            const pct    = ((info.count / totalCmds) * 100).toFixed(1);
+            const barPct = Math.round((info.count / maxCat) * 100);
+            return (
+              <div key={cat} className={`freq-row ${info.risk ? "freq-row-risk" : ""}`}>
+                <span className="fch-catname freq-cat-name"
+                  style={{ color: info.risk ? "#dc2626" : info.color, fontWeight: info.risk ? 700 : 500 }}>
+                  {info.risk && <AlertTriangle size={11} style={{ marginRight: 5, verticalAlign: "middle" }} />}
+                  {cat}
+                </span>
+                <span className="fch-risk">
+                  <span className="freq-risk-pill"
+                    style={{ background: info.risk ? "#fef2f2" : "#f0fdf4", color: info.risk ? "#dc2626" : "#16a34a", border: `1px solid ${info.risk ? "#fecaca" : "#86efac"}` }}>
+                    {info.risk ? "High Risk" : "Normal"}
+                  </span>
+                </span>
+                <span className="fch-count freq-count-val" style={{ color: info.risk ? "#dc2626" : undefined }}>{info.count}</span>
+                <span className="fch-pct freq-pct-val">{pct}%</span>
+                <div className="fch-bar freq-bar-wrap">
+                  <div className="freq-bar-track">
+                    <div className="freq-bar-fill" style={{ width: `${barPct}%`, background: info.risk ? "#dc2626" : info.color }} />
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Suspicious commands — category-split layout ───────────────────────────────
+const SC_HIGH_RISK = BH_HIGH_RISK;
+
+function SuspiciousCommandsPanel({ events: sevs }) {
+  const allCats = [...new Set(sevs.map(ev => ev.data?.category || "General"))].sort();
+  const [activeCat, setActiveCat] = useState(allCats[0] || "General");
+  const [search,    setSearch]    = useState("");
+
+  const catCounts = allCats.reduce((acc, cat) => {
+    acc[cat] = sevs.filter(ev => (ev.data?.category || "General") === cat).length;
+    return acc;
+  }, {});
+
+  const catItems = sevs
+    .filter(ev => (ev.data?.category || "General") === activeCat)
+    .filter(ev => !search ||
+      (ev.data?.command || "").toLowerCase().includes(search.toLowerCase()) ||
+      (ev.data?.label   || "").toLowerCase().includes(search.toLowerCase()));
+
+  const isHR = SC_HIGH_RISK.has(activeCat);
+
+  return (
+    <div className="sc-split">
+      {/* Left: category nav */}
+      <nav className="sc-cat-nav">
+        <div className="sc-cat-nav-header">
+          <Filter size={11} style={{ marginRight: 5 }} />Categories
+        </div>
+        {allCats.map(cat => {
+          const hr  = SC_HIGH_RISK.has(cat);
+          const cnt = catCounts[cat];
+          return (
+            <button key={cat}
+              className={`sc-cat-nav-btn ${activeCat === cat ? "active" : ""}`}
+              onClick={() => { setActiveCat(cat); setSearch(""); }}>
+              {hr && <AlertTriangle size={10} style={{ color: "#dc2626", flexShrink: 0 }} />}
+              <span className="sc-cat-nav-label">{cat}</span>
+              <span className="sc-cat-nav-count"
+                style={{ background: hr ? "#fef2f2" : undefined, color: hr ? "#dc2626" : undefined,
+                         border: `1px solid ${hr ? "#fecaca" : "#e5e7eb"}` }}>
+                {cnt}
+              </span>
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* Right: command list */}
+      <div className="sc-cmd-pane">
+        <div className="sc-cmd-pane-header">
+          {isHR && <AlertTriangle size={13} style={{ color: "#dc2626" }} />}
+          <span style={{ color: isHR ? "#dc2626" : undefined, fontWeight: 600 }}>{activeCat}</span>
+          <span className="del-count">{catItems.length} / {catCounts[activeCat]}</span>
+          <input className="tl-search" placeholder="Filter commands…"
+            value={search} onChange={e => setSearch(e.target.value)}
+            style={{ marginLeft: "auto", maxWidth: 200 }} />
+        </div>
+        <div className="sc-cmd-list">
+          {catItems.length === 0
+            ? <div className="tl-empty-mini">No commands match filter.</div>
+            : catItems.map((ev, i) => {
+                const d = ev.data || {};
+                const c = SEV_COLOR[ev.severity] || "#d97706";
+                return (
+                  <div key={i} className="sc-cmd-item" style={{ borderLeft: `3px solid ${c}` }}>
+                    <div className="sc-cmd-item-top">
+                      <span className="sc-cmd-meta">
+                        {d.user     && <span className="sc-meta-chip sc-meta-user"><Users size={9} />{d.user}</span>}
+                        {d.line_no != null && <span className="sc-meta-chip sc-meta-line">L{d.line_no}</span>}
+                        {ev.timestamp !== "unknown" && <span className="sc-meta-chip sc-meta-ts">{ev.timestamp}</span>}
+                      </span>
+                      <span className="sc-cmd-label">{d.label || ""}</span>
+                      <SevBadge sev={ev.severity} />
+                    </div>
+                    <code className="sc-cmd-code">{d.command || ""}</code>
+                  </div>
+                );
+              })
+          }
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Bash History: Raw view ────────────────────────────────────────────────────
+const RH_HIGH_RISK = BH_HIGH_RISK;
+
+function BashRawView({ rawEvents }) {
+  const [selectedUser, setSelectedUser] = useState("");
+  const [catFilter,    setCatFilter]    = useState("all");
+  const [showSuspOnly, setShowSuspOnly] = useState(false);
+  const [histSearch,   setHistSearch]   = useState("");
+
+  if (!rawEvents.length)
+    return <div className="tl-empty-mini">No raw history data. The history file may be empty.</div>;
+
+  const activeUser = selectedUser || rawEvents[0]?.data?.user || "";
+  const ev         = rawEvents.find(e => e.data?.user === activeUser) || rawEvents[0];
+  const lines      = ev?.data?.lines || [];
+  const suspCount  = lines.filter(l => l.suspicious).length;
+
+  const cats = ["all", ...new Set(lines.map(l => l.category))];
+  const visible = lines.filter(l => {
+    if (showSuspOnly && !l.suspicious) return false;
+    if (catFilter !== "all" && l.category !== catFilter) return false;
+    if (histSearch && !l.cmd.toLowerCase().includes(histSearch.toLowerCase())) return false;
+    return true;
+  });
+
+  return (
+    <div>
+      {/* User selector */}
+      {rawEvents.length > 1 && (
+        <div className="rh-user-tabs">
+          {rawEvents.map(e => {
+            const u = e.data?.user || "unknown";
+            return (
+              <button key={u}
+                className={`rh-user-tab ${activeUser === u ? "active" : ""}`}
+                onClick={() => { setSelectedUser(u); setCatFilter("all"); setShowSuspOnly(false); setHistSearch(""); }}>
+                <Users size={12} style={{ marginRight: 4 }} />{u}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <div className="rh-toolbar">
+        <span className="rh-stat">{lines.length} commands</span>
+        <span className="rh-stat rh-stat-danger">{suspCount} suspicious</span>
+        <span className="rh-stat rh-stat-muted">{ev?.data?.path}</span>
+        <label className="rh-toggle">
+          <input type="checkbox" checked={showSuspOnly} onChange={e => setShowSuspOnly(e.target.checked)} />
+          Suspicious only
+        </label>
+        <select className="rh-select" value={catFilter} onChange={e => setCatFilter(e.target.value)}>
+          {cats.map(c => <option key={c} value={c}>{c === "all" ? "All categories" : c}</option>)}
+        </select>
+        <input className="tl-search" placeholder="Search commands…" value={histSearch}
+          onChange={e => setHistSearch(e.target.value)} />
+      </div>
+      <div className="rh-viewer">
+        <table className="rh-table">
+          <thead>
+            <tr>
+              <th className="rh-th-lineno">Line</th>
+              <th className="rh-th-ts">Timestamp</th>
+              <th className="rh-th-cat">Category</th>
+              <th>Command</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.length === 0
+              ? <tr><td colSpan={4} style={{ textAlign:"center", padding:"24px", color:"#9ca3af" }}>No lines match filter.</td></tr>
+              : visible.map(line => {
+                  const isHR   = RH_HIGH_RISK.has(line.category);
+                  const catClr = isHR ? "#dc2626" : line.category !== "General" ? "#6366f1" : "#9ca3af";
+                  return (
+                    <tr key={line.no} className={line.suspicious ? "rh-row-susp" : ""}>
+                      <td className="rh-td-lineno">{line.no}</td>
+                      <td className="rh-td-ts">{line.ts || "—"}</td>
+                      <td className="rh-td-cat" style={{ color: catClr }}>
+                        {isHR && <AlertTriangle size={10} style={{ marginRight: 3, verticalAlign:"middle" }} />}
+                        {line.category !== "General" ? line.category : ""}
+                      </td>
+                      <td><code className="rh-cmd">{line.cmd}</code></td>
+                    </tr>
+                  );
+                })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Bash History section (Analysis + Raw sub-tabs) ────────────────────────────
+function BashHistorySection({ events }) {
+  const [view, setView] = useState("analysis");
+  const bashEvs   = events.filter(e => e.source === "bash_history");
+  const rawEvents = bashEvs.filter(e => e.event_type === "bash_history_raw");
+  const totalCmds = rawEvents.reduce((s, e) => s + (e.data?.lines?.length || 0), 0);
+
+  if (!bashEvs.length)
+    return (
+      <div className="bh-empty-info">
+        <Terminal size={36} strokeWidth={1.2} style={{ color: "#d1d5db", marginBottom: 12 }} />
+        <p style={{ fontWeight: 600, marginBottom: 6, color: "#374151" }}>No bash history found</p>
+        <p style={{ color: "#6b7280", fontSize: 12, maxWidth: 380, lineHeight: 1.6 }}>
+          No <code>.bash_history</code> files were found in this image. This can mean:
+        </p>
+        <ul style={{ color: "#6b7280", fontSize: 12, textAlign: "left", marginTop: 8, lineHeight: 1.8, paddingLeft: 20 }}>
+          <li>The image is a minimal or freshly created system</li>
+          <li>History was deliberately wiped before capture</li>
+          <li>The shell was configured with <code>HISTSIZE=0</code> or <code>HISTFILE=/dev/null</code></li>
+          <li>The user never ran an interactive shell session</li>
+        </ul>
+      </div>
+    );
+
+  return (
+    <div>
+      <div className="bh-subtabs">
+        <button className={`bh-subtab ${view === "analysis" ? "active" : ""}`}
+          onClick={() => setView("analysis")}>
+          <Activity size={12} style={{ marginRight: 5 }} />Analysis
+        </button>
+        <button className={`bh-subtab ${view === "raw" ? "active" : ""}`}
+          onClick={() => setView("raw")}>
+          <BookOpen size={12} style={{ marginRight: 5 }} />Raw History{totalCmds > 0 ? ` (${totalCmds})` : ""}
+        </button>
+      </div>
+      {view === "analysis" && <BashAnalysisView events={bashEvs} />}
+      {view === "raw"      && <BashRawView rawEvents={rawEvents} />}
+    </div>
+  );
+}
+
+// ── Simple log events table ───────────────────────────────────────────────────
+function LogSection({ title, sources, events }) {
+  const [search, setSearch] = useState("");
+  const logEvs = events.filter(e => sources.includes(e.source));
+  const visible = search
+    ? logEvs.filter(e => e.detail.toLowerCase().includes(search.toLowerCase()))
+    : logEvs;
+  const sevCounts = logEvs.reduce((a, e) => { a[e.severity] = (a[e.severity] || 0) + 1; return a; }, {});
+
+  if (!logEvs.length)
+    return (
+      <div className="log-section-empty">
+        <Server size={32} strokeWidth={1.2} style={{ color:"#d1d5db", marginBottom:8 }} />
+        <p style={{ color:"#9ca3af", fontSize:13 }}>No {title} events in this image.</p>
+      </div>
+    );
+
+  return (
+    <div className="log-section">
+      <div className="log-section-toolbar">
+        <div className="log-stats">
+          {Object.entries(sevCounts).filter(([,v]) => v > 0).map(([sev, cnt]) => (
+            <span key={sev} className="log-stat-badge"
+              style={{ background: SEV_BG[sev] || "#f3f4f6", color: SEV_COLOR[sev] || "#6b7280" }}>
+              {cnt} {sev}
+            </span>
+          ))}
+        </div>
+        <input className="tl-search" placeholder={`Search ${title}…`} value={search}
+          onChange={e => setSearch(e.target.value)} />
       </div>
       <div className="tl-list">
-        {filtered.length === 0
-          ? <div className="tl-empty">No events match the current filter.</div>
-          : filtered.map((ev, i) => {
-              const Icon = SRC_ICON[ev.source] || Activity;
-              return (
-                <div key={i} className="tl-row" style={{ borderLeft: `3px solid ${SEV_COLOR[ev.severity] || "#6b7280"}`, background: SEV_BG[ev.severity] || "#fff" }}>
-                  <div className="tl-ts">{ev.timestamp}</div>
-                  <span className="tl-icon-wrap"><Icon size={13} style={{ color: SEV_COLOR[ev.severity] || "#6b7280" }} /></span>
-                  <div className="tl-body"><span className="tl-source">[{ev.source}]</span><span className="tl-detail">{ev.detail}</span></div>
-                  <SevBadge sev={ev.severity} />
-                </div>
-              );
-            })}
+        {visible.map((ev, i) => <GenericEventRow key={i} ev={ev} />)}
+        {visible.length === 0 && <div className="tl-empty">No events match search.</div>}
+      </div>
+    </div>
+  );
+}
+
+// ── Timeline Tab (source-nav + sections) ──────────────────────────────────────
+function TimelineTab({ events = [] }) {
+  const [source, setSource] = useState("bash");
+
+  if (!events.length) return <EmptyState icon={Clock} message="No timeline events found." />;
+
+  // Count significant events per source for nav badges
+  const bashHigh = events.filter(e => e.source === "bash_history" && (e.severity === "high" || e.severity === "critical")).length;
+  const authEvs  = events.filter(e => ["auth.log","secure"].includes(e.source));
+  const sysEvs   = events.filter(e => ["syslog","messages"].includes(e.source));
+  const authHigh = authEvs.filter(e => e.severity === "high" || e.severity === "critical").length;
+  const sysHigh  = sysEvs.filter(e => e.severity === "high" || e.severity === "critical").length;
+
+  const srcNav = [
+    { id: "bash",  label: "Bash History", Icon: Terminal, badge: bashHigh },
+    { id: "auth",  label: "Auth Log",     Icon: Lock,     badge: authHigh, count: authEvs.length },
+    { id: "syslog",label: "System Log",   Icon: Server,   badge: sysHigh,  count: sysEvs.length },
+  ];
+
+  return (
+    <div className="tab-content tl-main">
+      {/* Source nav */}
+      <div className="tl-src-nav">
+        {srcNav.map(({ id, label, Icon, badge, count }) => (
+          <button key={id}
+            className={`tl-src-btn ${source === id ? "active" : ""}`}
+            onClick={() => setSource(id)}>
+            <Icon size={13} style={{ flexShrink: 0 }} />
+            <span>{label}</span>
+            {count != null && !badge && <span className="tl-src-count">{count}</span>}
+            {badge > 0 && <span className="tl-src-badge">{badge}</span>}
+          </button>
+        ))}
+      </div>
+
+      {/* Content area */}
+      <div className="tl-src-content">
+        {source === "bash"   && <BashHistorySection events={events} />}
+        {source === "auth"   && <LogSection title="Auth Log"    sources={["auth.log","secure"]}   events={events} />}
+        {source === "syslog" && <LogSection title="System Log"  sources={["syslog","messages"]}   events={events} />}
       </div>
     </div>
   );
@@ -993,11 +1741,11 @@ function ToolsTab({ findings = [] }) {
 
 // ─── Dashboard (Report panel) ─────────────────────────────────────────────────
 const REPORT_TABS = [
-  { id: "summary",     label: "Summary",      Icon: HardDrive },
-  { id: "timeline",    label: "Timeline",     Icon: Clock     },
-  { id: "deleted",     label: "Deleted",      Icon: Eye       },
-  { id: "persistence", label: "Persistence",  Icon: Shield    },
-  { id: "tools",       label: "Tools",        Icon: Search    },
+  { id: "summary",     label: "Summary",     Icon: HardDrive },
+  { id: "timeline",    label: "Timeline",    Icon: Clock     },
+  { id: "deleted",     label: "Deleted",     Icon: Eye       },
+  { id: "persistence", label: "Persistence", Icon: Shield    },
+  { id: "tools",       label: "Tools",       Icon: Search    },
 ];
 
 function ReportPanel({ report, onClear, onExport }) {

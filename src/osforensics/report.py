@@ -29,6 +29,7 @@ class TimelineEvent(BaseModel):
     event_type: str
     detail: str
     severity: str = "info"
+    data: Optional[Dict[str, Any]] = None
 
 
 # ── Deleted file models ───────────────────────────────────────────────────────
