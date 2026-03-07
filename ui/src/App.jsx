@@ -601,6 +601,38 @@ function ContentPane({ item, imgPath }) {
   );
 }
 
+// ─── Pane Divider (drag-to-resize) ─────────────────────────────────────────────
+function PaneDivider({ onDrag }) {
+  const dragging = useRef(false);
+  const lastX    = useRef(0);
+
+  const onMouseDown = useCallback((e) => {
+    e.preventDefault();
+    dragging.current = true;
+    lastX.current    = e.clientX;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    function onMove(e) {
+      if (!dragging.current) return;
+      const dx = e.clientX - lastX.current;
+      lastX.current = e.clientX;
+      onDrag(dx);
+    }
+    function onUp() {
+      dragging.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup",   onUp);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup",   onUp);
+  }, [onDrag]);
+
+  return <div className="pane-divider" onMouseDown={onMouseDown} />;
+}
+
 // ─── Full Explorer (3-pane) ───────────────────────────────────────────────────
 function Explorer({ imgPath }) {
   const [tree, setTree]             = useState(null);
@@ -612,6 +644,8 @@ function Explorer({ imgPath }) {
   const [browsePath, setBrowsePath] = useState(null);
   const [selectedFile, setSelFile]  = useState(null);
   const [navStack, setNavStack]     = useState([]);
+  const [treeWidth, setTreeWidth]   = useState(230);
+  const [metaWidth, setMetaWidth]   = useState(300);
 
   // Load tree once
   useEffect(() => {
@@ -699,10 +733,13 @@ function Explorer({ imgPath }) {
     finally { setBrowseL(false); }
   }
 
+  const clampTree = (w) => Math.max(140, Math.min(520, w));
+  const clampMeta  = (w) => Math.max(180, Math.min(620, w));
+
   return (
     <div className="explorer-shell">
       {/* Left: tree */}
-      <div className="explorer-tree-pane">
+      <div className="explorer-tree-pane" style={{ width: treeWidth }}>
         <div className="explorer-pane-header">
           <FolderOpenIcon size={12} /> Artifact Tree
         </div>
@@ -716,6 +753,8 @@ function Explorer({ imgPath }) {
           ))}
         </div>
       </div>
+
+      <PaneDivider onDrag={(dx) => setTreeWidth(w => clampTree(w + dx))} />
 
       {/* Middle: file list */}
       <div className="explorer-files-pane">
@@ -737,8 +776,10 @@ function Explorer({ imgPath }) {
         />
       </div>
 
+      <PaneDivider onDrag={(dx) => setMetaWidth(w => clampMeta(w - dx))} />
+
       {/* Right: metadata + content */}
-      <div className="explorer-meta-pane">
+      <div className="explorer-meta-pane" style={{ width: metaWidth }}>
         <div className="explorer-pane-header">
           <Info size={12} /> Properties
         </div>

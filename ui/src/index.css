@@ -1007,15 +1007,27 @@ kbd {
   color: var(--fg);
 }
 
+/* ── Pane divider (drag handle) ────────────────────────────────────────────── */
+.pane-divider {
+  width: 4px;
+  flex-shrink: 0;
+  background: var(--border);
+  cursor: col-resize;
+  transition: background .12s;
+}
+.pane-divider:hover,
+.pane-divider:active {
+  background: var(--accent);
+}
+
 /* ── Left: Artifact Tree Pane ─────────────────────────────────────────────── */
 .explorer-tree-pane {
-  width: 230px;
-  min-width: 180px;
+  /* width driven by inline style — resizable */
   flex-shrink: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   background: #f4f5f9;
-  border-right: 1px solid var(--border);
   overflow: hidden;
 }
 
@@ -1164,8 +1176,7 @@ kbd {
 
 /* ── Right: Metadata + Content Pane ──────────────────────────────────────── */
 .explorer-meta-pane {
-  width: 300px;
-  min-width: 240px;
+  /* width set via inline style (resizable) */
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
