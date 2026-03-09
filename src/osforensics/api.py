@@ -204,6 +204,114 @@ def browser_scan(req: AnalyzeRequest):
         raise HTTPException(status_code=500, detail={"error": str(e), "trace": traceback.format_exc()})
 
 
+@app.get("/live/info")
+def live_info():
+    """Return runtime information about the currently running host system."""
+    import socket
+    import subprocess
+
+    def _read(path: str, default: str = "") -> str:
+        try:
+            with open(path) as f:
+                return f.read().strip()
+        except Exception:
+            return default
+
+    # Kernel version (third token of /proc/version)
+    version_line = _read("/proc/version")
+    kernel = version_line.split()[2] if version_line else "unknown"
+
+    # Uptime
+    uptime_raw = _read("/proc/uptime", "0").split()[0]
+    try:
+        uptime_secs = float(uptime_raw)
+    except Exception:
+        uptime_secs = 0.0
+    uptime_h = int(uptime_secs // 3600)
+    uptime_m = int((uptime_secs % 3600) // 60)
+    uptime_str = f"{uptime_h}h {uptime_m}m" if uptime_h else f"{uptime_m}m"
+
+    # Load averages
+    load_avg = _read("/proc/loadavg", "").split()[:3]
+
+    # Memory (values are in kB)
+    meminfo: dict[str, int] = {}
+    for line in _read("/proc/meminfo").splitlines():
+        if ":" in line:
+            k, _, v = line.partition(":")
+            try:
+                meminfo[k.strip()] = int(v.strip().split()[0])
+            except Exception:
+                pass
+    mem_total = meminfo.get("MemTotal", 0)
+    mem_avail = meminfo.get("MemAvailable", 0)
+    used_pct  = round((1 - mem_avail / mem_total) * 100, 1) if mem_total else 0
+
+    # OS release
+    os_release: dict[str, str] = {}
+    for line in _read("/etc/os-release").splitlines():
+        if "=" in line:
+            k, _, v = line.partition("=")
+            os_release[k.strip()] = v.strip().strip('"')
+
+    # Network interfaces (exclude loopback)
+    try:
+        ifaces = [i for i in os.listdir("/sys/class/net/") if i != "lo"]
+    except Exception:
+        ifaces = []
+
+    # Running process count from /proc
+    try:
+        process_count = sum(1 for d in os.listdir("/proc") if d.isdigit())
+    except Exception:
+        process_count = 0
+
+    # Logged-in users via `who` (best-effort)
+    users: list[str] = []
+    try:
+        result = subprocess.run(
+            ["who"], capture_output=True, text=True, timeout=3
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().splitlines():
+                parts = line.split()
+                if parts:
+                    users.append(parts[0])
+    except Exception:
+        pass
+
+    return {
+        "hostname":      socket.gethostname(),
+        "os_name":       os_release.get("PRETTY_NAME") or os_release.get("NAME", "Linux"),
+        "os_id":         os_release.get("ID", "linux"),
+        "kernel":        kernel,
+        "uptime_seconds": uptime_secs,
+        "uptime_str":    uptime_str,
+        "load_avg":      load_avg,
+        "memory": {
+            "total_kb":     mem_total,
+            "available_kb": mem_avail,
+            "used_pct":     used_pct,
+        },
+        "interfaces":    ifaces,
+        "process_count": process_count,
+        "users":         list(set(users)),
+    }
+
+
+@app.post("/analyze/live")
+def analyze_live():
+    """Full forensic analysis of the running host system (uses '/' as root)."""
+    try:
+        fs = FilesystemAccessor("/")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        return _full_analysis(fs)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": str(e), "trace": traceback.format_exc()})
+
+
 # ── Explorer endpoints (Autopsy-style navigation) ─────────────────────────────
 
 @app.get("/explore/tree")

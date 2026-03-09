@@ -28,12 +28,14 @@ const get = async (url) => {
   return res.json();
 };
 
-const apiAnalyze  = (path)       => post("/analyze",        { image_path: path });
-const apiFsBrowse = (path)       => post("/fs/browse",      { path });
-const apiBrowse   = (img, path)  => post("/explore/browse", { image_path: img, path });
-const apiStat     = (img, path)  => post("/explore/stat",   { image_path: img, path });
-const apiRead     = (img, path)  => post("/explore/read",   { image_path: img, path });
-const apiTree        = ()                => get("/explore/tree");
+const apiAnalyze     = (path)       => post("/analyze",        { image_path: path });
+const apiAnalyzeLive = ()            => post("/analyze/live",  {});
+const apiLiveInfo    = ()            => get("/live/info");
+const apiFsBrowse    = (path)        => post("/fs/browse",      { path });
+const apiBrowse      = (img, path)   => post("/explore/browse", { image_path: img, path });
+const apiStat        = (img, path)   => post("/explore/stat",   { image_path: img, path });
+const apiRead        = (img, path)   => post("/explore/read",   { image_path: img, path });
+const apiTree        = ()            => get("/explore/tree");
 
 // ── Case management API ───────────────────────────────────────────────────────
 const apiCasesList   = ()                => get("/cases");
@@ -955,7 +957,67 @@ function SnippetBlock({ snippet }) {
   );
 }
 
-function SummaryTab({ report }) {
+// ── Live System Info Banner ───────────────────────────────────────────────────
+function LiveInfoBanner({ info }) {
+  if (!info) return null;
+  const memUsedGB = info.memory?.total_kb
+    ? ((info.memory.total_kb - info.memory.available_kb) / 1024 / 1024).toFixed(1)
+    : null;
+  const memTotalGB = info.memory?.total_kb
+    ? (info.memory.total_kb / 1024 / 1024).toFixed(1)
+    : null;
+  return (
+    <div className="live-banner">
+      <div className="live-banner-badge"><Cpu size={12} /> LIVE SYSTEM</div>
+      <div className="live-banner-cells">
+        <div className="live-cell">
+          <span className="live-cell-label">Hostname</span>
+          <span className="live-cell-val">{info.hostname || "—"}</span>
+        </div>
+        <div className="live-cell">
+          <span className="live-cell-label">OS</span>
+          <span className="live-cell-val">{info.os_name || "—"}</span>
+        </div>
+        <div className="live-cell">
+          <span className="live-cell-label">Kernel</span>
+          <span className="live-cell-val live-mono">{info.kernel || "—"}</span>
+        </div>
+        <div className="live-cell">
+          <span className="live-cell-label">Uptime</span>
+          <span className="live-cell-val">{info.uptime_str || "—"}</span>
+        </div>
+        <div className="live-cell">
+          <span className="live-cell-label">Load</span>
+          <span className="live-cell-val live-mono">{info.load_avg?.join(" ") || "—"}</span>
+        </div>
+        {memTotalGB && (
+          <div className="live-cell">
+            <span className="live-cell-label">Memory</span>
+            <span className="live-cell-val">{memUsedGB} / {memTotalGB} GB ({info.memory.used_pct}%)</span>
+          </div>
+        )}
+        <div className="live-cell">
+          <span className="live-cell-label">Processes</span>
+          <span className="live-cell-val">{info.process_count ?? "—"}</span>
+        </div>
+        {info.users?.length > 0 && (
+          <div className="live-cell">
+            <span className="live-cell-label">Users</span>
+            <span className="live-cell-val">{info.users.join(", ")}</span>
+          </div>
+        )}
+        {info.interfaces?.length > 0 && (
+          <div className="live-cell">
+            <span className="live-cell-label">Interfaces</span>
+            <span className="live-cell-val live-mono">{info.interfaces.join(", ")}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SummaryTab({ report, liveInfo }) {
   const { os_info, summary } = report;
   const totalHigh = summary?.total_high ?? 0;
   const threatLevel =
@@ -975,6 +1037,7 @@ function SummaryTab({ report }) {
   ];
   return (
     <div className="tab-content">
+      {liveInfo && <LiveInfoBanner info={liveInfo} />}
       <div className="sum-top">
         <div className="sum-os-card">
           <div className="sum-os-label">Operating System</div>
@@ -2663,9 +2726,10 @@ const REPORT_TABS = [
   { id: "tools",       label: "Tools",       Icon: Search    },
 ];
 
-function ReportPanel({ report, onClear, onExport, onReanalyze, reanalyzing }) {
+function ReportPanel({ report, liveInfo, onClear, onExport, onReanalyze, reanalyzing }) {
   const [tab, setTab] = useState("summary");
   const { summary } = report;
+  const isLive = !!liveInfo;
   const badge = {
     timeline:    summary?.high_timeline    > 0 ? summary.high_timeline    : null,
     deleted:     summary?.high_deleted     > 0 ? summary.high_deleted     : null,
@@ -2681,6 +2745,7 @@ function ReportPanel({ report, onClear, onExport, onReanalyze, reanalyzing }) {
         <div className="report-panel-header-left">
           <Microscope size={15} strokeWidth={1.6} style={{ color: "#2563eb" }} />
           <span className="report-panel-title">Analysis Report</span>
+          {isLive && <span className="rp-live-badge"><Cpu size={11} /> LIVE SYSTEM</span>}
           <span className="dash-os">{report.os_info?.name || "Unknown OS"}</span>
           {(summary?.total_high ?? 0) > 0 && (
             <span className="dash-alert"><AlertTriangle size={11} />{summary.total_high} high</span>
@@ -2703,7 +2768,7 @@ function ReportPanel({ report, onClear, onExport, onReanalyze, reanalyzing }) {
         ))}
       </div>
       <div className="report-panel-body">
-        {tab === "summary"     && <SummaryTab     report={report} />}
+        {tab === "summary"     && <SummaryTab     report={report} liveInfo={liveInfo} />}
         {tab === "timeline"    && <TimelineTab    events={report.timeline} />}
         {tab === "deleted"     && <DeletedTab     findings={report.deleted} />}
         {tab === "persistence" && <PersistenceTab findings={report.persistence} />}
@@ -3070,6 +3135,11 @@ function WorkspaceHome({ onAction }) {
           <span className="qa-label">Browse & Open</span>
           <span className="qa-hint">Ctrl+B</span>
         </button>
+        <button className="qa-btn qa-btn-live" onClick={() => onAction("live_scan")}>
+          <span className="qa-icon"><Cpu size={28} strokeWidth={1.5} /></span>
+          <span className="qa-label">Scan Live System</span>
+          <span className="qa-hint">Ctrl+L</span>
+        </button>
       </div>
       <p className="ws-tip">Use the <kbd>File</kbd> menu or toolbar to begin. Press <kbd>F1</kbd> for help.</p>
     </div>
@@ -3112,10 +3182,12 @@ export default function App() {
   const [dialog,      setDialog]      = useState(null);
   const [report,      setReport]      = useState(null);
   const [imgPath,     setImgPath]     = useState(null);
+  const [liveInfo,    setLiveInfo]    = useState(null);
   const [status,      setStatus]      = useState("Ready");
   const [toolbar,     setToolbar]     = useState(true);
   const [statbar,     setStatbar]     = useState(true);
   const [reanalyzing, setReanalyzing] = useState(false);
+  const [liveScanning,setLiveScanning]= useState(false);
   // "home" | "cases" | "case" | "explorer" | "report"
   const [view,        setView]        = useState("home");
   const [activeCase,  setActiveCase]  = useState(null);
@@ -3140,13 +3212,30 @@ export default function App() {
     setReanalyzing(true);
     setStatus("Reanalyzing…");
     try {
-      const r = await apiAnalyze(imgPath);
+      const r = imgPath === "/" ? await apiAnalyzeLive() : await apiAnalyze(imgPath);
       handleResult(r, imgPath);
       setStatus(`Reanalysis complete — ${r.summary?.total_high ?? 0} high-severity indicator(s)`);
     } catch (e) {
       setStatus(`Reanalyze failed: ${e.message}`);
     } finally {
       setReanalyzing(false);
+    }
+  }
+
+  async function handleLiveScan() {
+    if (liveScanning) return;
+    setLiveScanning(true);
+    setStatus("Scanning live system…");
+    try {
+      const [info, r] = await Promise.all([apiLiveInfo(), apiAnalyzeLive()]);
+      setLiveInfo(info);
+      handleResult(r, "/");
+      const hi = r.summary?.total_high ?? 0;
+      setStatus(`Live scan complete (${info.hostname}) — ${hi} high-severity indicator${hi !== 1 ? "s" : ""}`);
+    } catch (e) {
+      setStatus(`Live scan failed: ${e.message}`);
+    } finally {
+      setLiveScanning(false);
     }
   }
 
@@ -3177,10 +3266,11 @@ export default function App() {
     switch (key) {
       case "analyze":       return setDialog("analyze");
       case "filepick":      return setDialog("filepick");
+      case "live_scan":     return handleLiveScan();
       case "new_case":      return setDialog("new_case");
       case "view_cases":    return setView("cases");
       case "export":        return report ? downloadJSON(report) : setStatus("No report to export");
-      case "clear":         setReport(null); setImgPath(null); setActiveCase(null); setActiveSrcId(null); setView("home"); return setStatus("Analysis cleared");
+      case "clear":         setReport(null); setImgPath(null); setLiveInfo(null); setActiveCase(null); setActiveSrcId(null); setView("home"); return setStatus("Analysis cleared");
       case "settings":      return setDialog("settings");
       case "shortcuts":     return setDialog("shortcuts");
       case "about":         return setDialog("about");
@@ -3198,6 +3288,7 @@ export default function App() {
     function onKey(e) {
       if (e.ctrlKey && e.key === "o") { e.preventDefault(); handleAction("analyze"); }
       if (e.ctrlKey && e.key === "b") { e.preventDefault(); handleAction("filepick"); }
+      if (e.ctrlKey && e.key === "l") { e.preventDefault(); handleAction("live_scan"); }
       if (e.ctrlKey && e.key === ",") { e.preventDefault(); handleAction("settings"); }
       if (e.key === "F1")             { e.preventDefault(); handleAction("about"); }
     }
@@ -3216,7 +3307,11 @@ export default function App() {
             <BookOpen size={11} /> {activeCase.name}{activeCase.number ? ` · ${activeCase.number}` : ""}
           </span>
         )}
-        {!activeCase && imgPath && <span className="title-path">{imgPath}</span>}
+        {!activeCase && imgPath && imgPath !== "/" && <span className="title-path">{imgPath}</span>}
+        {!activeCase && imgPath === "/" && (
+          <span className="title-live-badge"><Cpu size={11} /> LIVE SYSTEM</span>
+        )}
+        {liveScanning && <span className="title-live-scanning"><RefreshCw size={11} className="spin" /> Scanning live system…</span>}
       </div>
       <MenuBar onAction={handleAction} />
       <Toolbar visible={toolbar} onAction={handleAction} />
@@ -3265,6 +3360,7 @@ export default function App() {
           {view === "report" && report && (
             <ReportPanel
               report={report}
+              liveInfo={imgPath === "/" ? liveInfo : null}
               onClear={() => handleAction("clear")}
               onExport={() => downloadJSON(report)}
               onReanalyze={handleReanalyze}
