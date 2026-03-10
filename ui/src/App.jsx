@@ -7,6 +7,7 @@ import {
   Wifi, Package, List, Database, Cpu, Box, Globe, Users, ChevronUp,
   File, Code, RefreshCw, Info, LayoutPanelLeft, BarChart2, Home,
   BookOpen, Plus, Filter, Bot, Send, Loader2, Zap,
+  Image, Film, Music, MapPin, Camera, Layers, Download, Play,
 } from "lucide-react";
 
 // ─── API ──────────────────────────────────────────────────────────────────────
@@ -47,6 +48,9 @@ const apiCaseDelSrc  = (caseId, srcId)   => fetch(`${API}/cases/${caseId}/source
 const apiRecover     = (img, recoveryId) => post("/deleted/recover", { image_path: img, recovery_id: recoveryId });
 const apiCarveGroups = ()                => get("/deleted/carve/groups");
 const apiCarve       = (img, opts)       => post("/deleted/carve", { image_path: img, ...opts });
+const apiMultimedia  = (path)            => post("/multimedia", { image_path: path });
+const apiMediaUrl    = (imgPath, filePath) =>
+  `${API}/multimedia/view?image_path=${encodeURIComponent(imgPath)}&file_path=${encodeURIComponent(filePath)}`;
 
 // ── Agent API ─────────────────────────────────────────────────────────────────
 const apiAgentStatus  = ()    => get("/agent/status");
@@ -3080,6 +3084,364 @@ function BrowserTab({ browsers = [] }) {
   );
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// MULTIMEDIA TAB
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const MM_TYPE_META = {
+  image: { Icon: Image,  label: "Image",  color: "#7c3aed" },
+  video: { Icon: Film,   label: "Video",  color: "#2563eb" },
+  audio: { Icon: Music,  label: "Audio",  color: "#16a34a" },
+  media: { Icon: Layers, label: "Media",  color: "#6b7280" },
+};
+
+function GpsLink({ gps }) {
+  if (!gps?.lat || !gps?.lon) return null;
+  const url = gps.maps_url || `https://www.google.com/maps?q=${gps.lat},${gps.lon}`;
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer" className="mm-gps-link">
+      <MapPin size={11} /> {gps.lat.toFixed(5)}, {gps.lon.toFixed(5)}
+      {gps.alt_m != null && <span style={{ marginLeft: 4, opacity: 0.7 }}>({gps.alt_m}m)</span>}
+    </a>
+  );
+}
+
+function MetaTable({ meta }) {
+  const SKIP = new Set(["mime_detected", "has_embedded_thumbnail", "gps_lat", "gps_lon",
+                         "gps_maps_url", "gps_alt_m", "width_px", "height_px"]);
+  const entries = Object.entries(meta || {}).filter(([k]) => !SKIP.has(k));
+  if (!entries.length) return null;
+  return (
+    <table className="mm-meta-table">
+      <tbody>
+        {entries.map(([k, v]) => (
+          <tr key={k}>
+            <td className="mm-meta-key">{k.replace(/_/g, " ")}</td>
+            <td className="mm-meta-val">{String(v)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function StreamsTable({ streams }) {
+  if (!streams || !streams.length) return null;
+  return (
+    <div className="mm-streams">
+      {streams.map((s, i) => (
+        <span key={i} className="mm-stream-tag">
+          {s.type === "video" ? <Film size={10} /> : <Music size={10} />}
+          {" "}{s.codec || s.type}
+          {s.width && ` ${s.width}×${s.height}`}
+          {s.fps &&   ` @ ${s.fps}`}
+          {s.sample_rate && ` ${s.sample_rate}Hz`}
+          {s.channels && ` ${s.channels}ch`}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function EmbeddedThumbnail({ thumbnail }) {
+  if (!thumbnail?.data_uri) return null;
+  return (
+    <div className="mm-thumb-wrap">
+      <img src={thumbnail.data_uri} alt="EXIF thumbnail"
+           className="mm-thumb"
+           title={`${thumbnail.width}×${thumbnail.height}`} />
+      <span className="mm-thumb-label">EXIF thumbnail {thumbnail.width}×{thumbnail.height}</span>
+    </div>
+  );
+}
+
+// ─── Media viewer modal ───────────────────────────────────────────────────────
+function MediaViewerModal({ item, imgPath, onClose, onPrev, onNext, hasPrev, hasNext }) {
+  const viewUrl = apiMediaUrl(imgPath, item.path);
+  const isImage = item.media_type === "image";
+  const isVideo = item.media_type === "video";
+  const fname   = item.path.split("/").pop();
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.key === "Escape")     onClose();
+      if (e.key === "ArrowLeft"  && hasPrev) onPrev();
+      if (e.key === "ArrowRight" && hasNext) onNext();
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [hasPrev, hasNext, onClose, onPrev, onNext]);
+
+  const meta = item.metadata || {};
+  const metaChips = [
+    meta.make && `${meta.make}${meta.model ? " " + meta.model : ""}`,
+    meta.datetime_original,
+    meta.width_px && `${meta.width_px}×${meta.height_px}`,
+    meta.duration_s && `${meta.duration_s}s`,
+    meta.software && `Software: ${meta.software}`,
+    item.gps?.lat && `GPS: ${item.gps.lat.toFixed(4)}, ${item.gps.lon.toFixed(4)}`,
+  ].filter(Boolean);
+
+  return (
+    <div className="mv-overlay" onClick={onClose}>
+      <div className="mv-modal" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="mv-header">
+          <span className="mv-fname">{fname}</span>
+          <span className="mv-path" title={item.path}>{item.path}</span>
+          <div className="mv-header-actions">
+            <a className="mv-download-btn" href={viewUrl} download={fname}>
+              <Download size={13} /> Download
+            </a>
+            <button className="mv-close" onClick={onClose} title="Close (Esc)">
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+
+        {/* Content area with side-nav arrows */}
+        <div className="mv-content-wrap">
+          <button className="mv-side-btn mv-side-prev" onClick={onPrev} disabled={!hasPrev} title="Previous (←)">
+            ‹
+          </button>
+
+          <div className="mv-content">
+            {isImage && <img src={viewUrl} alt={fname} className="mv-img" />}
+            {isVideo && (
+              <video controls autoPlay className="mv-video">
+                <source src={viewUrl} />
+              </video>
+            )}
+            {!isImage && !isVideo && (
+              <div className="mv-audio-wrap">
+                <Music size={64} className="mv-audio-icon" />
+                <div className="mv-audio-fname">{fname}</div>
+                <audio controls autoPlay className="mv-audio">
+                  <source src={viewUrl} />
+                </audio>
+              </div>
+            )}
+          </div>
+
+          <button className="mv-side-btn mv-side-next" onClick={onNext} disabled={!hasNext} title="Next (→)">
+            ›
+          </button>
+        </div>
+
+        {/* Metadata chips */}
+        {metaChips.length > 0 && (
+          <div className="mv-meta-bar">
+            {metaChips.map((c, i) => <span key={i} className="mv-meta-chip">{c}</span>)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MediaRow({ item, imgPath, onView }) {
+  const [open, setOpen] = useState(false);
+  const mt = MM_TYPE_META[item.media_type] || MM_TYPE_META.media;
+  const Icon = mt.Icon;
+  const hasBadFlags = item.severity === "high" || item.severity === "critical";
+  const hasMedFlags = item.severity === "medium";
+
+  const fmtSize = (n) => {
+    if (!n) return "";
+    if (n < 1024) return `${n}B`;
+    if (n < 1024**2) return `${(n/1024).toFixed(1)}KB`;
+    return `${(n/1024**2).toFixed(1)}MB`;
+  };
+
+  return (
+    <div className={`mm-row ${hasBadFlags ? "mm-row-high" : hasMedFlags ? "mm-row-med" : ""}`}>
+      <div className="mm-row-header" onClick={() => setOpen(o => !o)}>
+        <span className="mm-row-chevron">
+          {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        </span>
+        <Icon size={13} style={{ color: mt.color, flexShrink: 0 }} />
+        <span className="mm-row-path" title={item.path}>{item.name || item.path.split("/").pop()}</span>
+        {item.size > 0 && <span className="mm-row-size">{fmtSize(item.size)}</span>}
+        {item.metadata?.resolution && (
+          <span className="mm-row-dim">{item.metadata.resolution}</span>
+        )}
+        {item.metadata?.width_px && (
+          <span className="mm-row-dim">{item.metadata.width_px}×{item.metadata.height_px}</span>
+        )}
+        <GpsLink gps={item.gps} />
+        <div style={{ flex: 1 }} />
+        {item.flags?.map(f => (
+          <span key={f} className="mm-flag-tag">{f}</span>
+        ))}
+        {imgPath && (
+          <button
+            className="mm-view-btn"
+            title="View file"
+            onClick={e => { e.stopPropagation(); onView(item); }}
+          >
+            <Play size={11} /> View
+          </button>
+        )}
+        <SevBadge sev={item.severity} />
+      </div>
+      {open && (
+        <div className="mm-row-body">
+          <div className="mm-row-path-full"><FileText size={10} /> {item.path}</div>
+          {item.findings?.length > 0 && (
+            <ul className="mm-findings-list">
+              {item.findings.map((f, i) => (
+                <li key={i} className="mm-finding-item"><AlertTriangle size={10} /> {f}</li>
+              ))}
+            </ul>
+          )}
+          <EmbeddedThumbnail thumbnail={item.thumbnail} />
+          <StreamsTable streams={item.streams} />
+          <MetaTable meta={item.metadata} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MultimediaTab({ findings = [], imgPath }) {
+  const [filterType, setFilterType] = useState("all");
+  const [filterSev,  setFilterSev]  = useState("all");
+  const [search,     setSearch]     = useState("");
+  const [running,    setRunning]    = useState(false);
+  const [err,        setErr]        = useState(null);
+  const [localFindings, setLocalFindings] = useState(findings);
+  const [viewItem,   setViewItem]   = useState(null);
+
+  // Sync when parent report findings change
+  useEffect(() => { setLocalFindings(findings); }, [findings]);
+
+  const items = (localFindings || []).filter(item => {
+    if (filterType !== "all" && item.media_type !== filterType) return false;
+    if (filterSev  !== "all" && item.severity    !== filterSev)  return false;
+    if (search) {
+      const q = search.toLowerCase();
+      return item.path?.toLowerCase().includes(q) ||
+             item.findings?.some(f => f.toLowerCase().includes(q));
+    }
+    return true;
+  });
+
+  const counts = {
+    image: (localFindings || []).filter(i => i.media_type === "image").length,
+    video: (localFindings || []).filter(i => i.media_type === "video").length,
+    audio: (localFindings || []).filter(i => i.media_type === "audio").length,
+  };
+  const flagged = (localFindings || []).filter(i => i.severity !== "info").length;
+  const withGps = (localFindings || []).filter(i => i.gps?.lat).length;
+
+  const handleRescan = async () => {
+    if (!imgPath) return;
+    setRunning(true); setErr(null);
+    try {
+      const data = await apiMultimedia(imgPath);
+      setLocalFindings(data.multimedia || []);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  if (!localFindings || localFindings.length === 0) {
+    return (
+      <div className="mm-tab">
+        <EmptyState icon={Image} message="No media files analysed." />
+        {imgPath && (
+          <div style={{ textAlign: "center", marginTop: 12 }}>
+            <button className="btn-primary btn-sm" onClick={handleRescan} disabled={running}>
+              {running ? "Scanning…" : "Scan for Media Files"}
+            </button>
+            {err && <div className="mm-err">{err}</div>}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mm-tab">
+      {/* Stats bar */}
+      <div className="mm-stats-bar">
+        <span className="mm-stat"><Image size={11} /><strong>{counts.image}</strong> image{counts.image !== 1 ? "s" : ""}</span>
+        <span className="mm-stat"><Film  size={11} /><strong>{counts.video}</strong> video{counts.video !== 1 ? "s" : ""}</span>
+        <span className="mm-stat"><Music size={11} /><strong>{counts.audio}</strong> audio</span>
+        {withGps > 0 && (
+          <span className="mm-stat mm-stat-warn"><MapPin size={11} /><strong>{withGps}</strong> with GPS</span>
+        )}
+        {flagged > 0 && (
+          <span className="mm-stat mm-stat-warn"><AlertTriangle size={11} /><strong>{flagged}</strong> flagged</span>
+        )}
+        <div style={{ flex: 1 }} />
+        {imgPath && (
+          <button className="btn-secondary btn-sm" onClick={handleRescan} disabled={running}>
+            <RefreshCw size={11} className={running ? "spin" : ""} />
+            {running ? "Scanning…" : "Re-scan"}
+          </button>
+        )}
+      </div>
+
+      {/* Filters */}
+      <div className="mm-filters">
+        <Filter size={11} />
+        <select value={filterType} onChange={e => setFilterType(e.target.value)} className="mm-select">
+          <option value="all">All types</option>
+          <option value="image">Images</option>
+          <option value="video">Videos</option>
+          <option value="audio">Audio</option>
+        </select>
+        <select value={filterSev} onChange={e => setFilterSev(e.target.value)} className="mm-select">
+          <option value="all">All severity</option>
+          <option value="critical">Critical</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="info">Info</option>
+        </select>
+        <input
+          type="text"
+          placeholder="Search path or finding…"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          className="mm-search"
+        />
+      </div>
+      {err && <div className="mm-err">{err}</div>}
+
+      {/* File list */}
+      <div className="mm-list">
+        {items.length === 0 ? (
+          <div className="mm-empty">No items match current filters.</div>
+        ) : (
+          items.map((item, i) => (
+            <MediaRow key={i} item={item} imgPath={imgPath} onView={setViewItem} />
+          ))
+        )}
+      </div>
+
+      {/* Viewer modal */}
+      {viewItem && imgPath && (() => {
+        const idx    = items.findIndex(i => i.path === viewItem.path);
+        const safeIdx = idx === -1 ? 0 : idx;
+        return (
+          <MediaViewerModal
+            item={viewItem}
+            imgPath={imgPath}
+            onClose={() => setViewItem(null)}
+            onPrev={() => setViewItem(items[safeIdx - 1])}
+            onNext={() => setViewItem(items[safeIdx + 1])}
+            hasPrev={safeIdx > 0}
+            hasNext={safeIdx < items.length - 1}
+          />
+        );
+      })()}
+    </div>
+  );
+}
+
 const REPORT_TABS = [
   { id: "summary",     label: "Summary",     Icon: HardDrive },
   { id: "timeline",    label: "Timeline",    Icon: Clock     },
@@ -3088,6 +3450,7 @@ const REPORT_TABS = [
   { id: "config",      label: "Config",      Icon: Settings  },
   { id: "services",    label: "Services",    Icon: Server    },
   { id: "browsers",    label: "Browsers",    Icon: Globe     },
+  { id: "multimedia",  label: "Multimedia",  Icon: Image     },
   { id: "tools",       label: "Tools",       Icon: Search    },
 ];
 
@@ -3102,6 +3465,7 @@ function ReportPanel({ report, liveInfo, imgPath, onClear, onExport, onReanalyze
     config:      summary?.high_config      > 0 ? summary.high_config      : null,
     services:    summary?.high_services    > 0 ? summary.high_services    : null,
     browsers:    summary?.high_browsers    > 0 ? summary.high_browsers    : null,
+    multimedia:  summary?.high_multimedia  > 0 ? summary.high_multimedia  : null,
     tools:       summary?.high_risk_tools  > 0 ? summary.high_risk_tools  : null,
   };
   return (
@@ -3140,6 +3504,7 @@ function ReportPanel({ report, liveInfo, imgPath, onClear, onExport, onReanalyze
         {tab === "config"      && <ConfigTab      findings={report.config} />}
         {tab === "services"    && <ServicesTab    services={report.services} />}
         {tab === "browsers"    && <BrowserTab     browsers={report.browsers} />}
+        {tab === "multimedia"  && <MultimediaTab  findings={report.multimedia} imgPath={imgPath} />}
         {tab === "tools"       && <ToolsTab       findings={report.findings} />}
       </div>
     </div>

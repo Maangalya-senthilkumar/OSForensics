@@ -110,6 +110,23 @@ class ServiceFinding(BaseModel):
     unit_path: str = ""
 
 
+# ── Multimedia analysis models ────────────────────────────────────────────────
+
+class MediaFinding(BaseModel):
+    path: str
+    name: str = ""
+    media_type: str                       # "image" | "video" | "audio"
+    ext: str = ""
+    size: Optional[int] = None
+    severity: str = "info"
+    flags: List[str] = []
+    findings: List[str] = []
+    metadata: Dict[str, Any] = {}
+    streams: List[Dict[str, Any]] = []
+    gps: Dict[str, Any] = {}
+    thumbnail: Optional[Dict[str, Any]] = None
+
+
 # ── Memory forensics models ───────────────────────────────────────────────────
 
 class MemoryProcess(BaseModel):
@@ -183,6 +200,7 @@ class ForensicReport(BaseModel):
     config: List[ConfigFinding] = []
     services: List[ServiceFinding] = []
     browsers: List[BrowserProfile] = []
+    multimedia: List[MediaFinding] = []
 
 
 def build_report(
@@ -194,6 +212,7 @@ def build_report(
     config: Optional[List[Dict]] = None,
     services: Optional[List[Dict]] = None,
     browsers: Optional[List[Dict]] = None,
+    multimedia: Optional[List[Dict]] = None,
 ) -> ForensicReport:
     os_model = OSInfo(
         name=os_info.get("name"),
@@ -231,11 +250,16 @@ def build_report(
         BrowserProfile(**b) for b in (browsers or [])
     ]
 
+    media_findings = [
+        MediaFinding(**m) for m in (multimedia or [])
+    ]
+
     high_timeline  = sum(1 for e in timeline_events  if e.severity == "high")
     high_deleted   = sum(1 for d in deleted_findings  if d.severity == "high")
     high_persist   = sum(1 for p in persistence_findings if p.severity == "high")
     high_config    = sum(1 for c in config_findings if c.severity in ("high", "critical"))
     high_services  = sum(1 for s in service_findings if s.severity in ("high", "critical"))
+    high_multimedia = sum(1 for m in media_findings if m.severity in ("high", "critical"))
 
     summary = {
         "total_tools":         len(tool_findings),
@@ -255,7 +279,9 @@ def build_report(
         "enabled_services":    sum(1 for s in service_findings if s.state == "enabled"),
         "browser_count":       len(browser_profiles),
         "high_browsers":       sum(1 for b in browser_profiles if b.severity in ("high", "critical")),
-        "total_high":          sum(1 for f in tool_findings if f.risk == "high") + high_timeline + high_deleted + high_persist + high_config + high_services + sum(1 for b in browser_profiles if b.severity in ("high", "critical")),
+        "multimedia_count":    len(media_findings),
+        "high_multimedia":     high_multimedia,
+        "total_high":          sum(1 for f in tool_findings if f.risk == "high") + high_timeline + high_deleted + high_persist + high_config + high_services + sum(1 for b in browser_profiles if b.severity in ("high", "critical")) + high_multimedia,
     }
 
     return ForensicReport(
@@ -268,4 +294,5 @@ def build_report(
         config=config_findings,
         services=service_findings,
         browsers=browser_profiles,
+        multimedia=media_findings,
     )
