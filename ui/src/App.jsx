@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   Search, FolderSearch, Trash2, Settings, Microscope,
   X, FolderOpen, AlertTriangle, CheckCircle, HardDrive, Activity,
@@ -1364,7 +1364,7 @@ function Section({ title, icon: Icon, count, severity, children, defaultOpen = t
 // ── Bash History: Analysis view ─────────────────────────────────────────────
 const BH_HIGH_RISK = new Set(["Reverse Shell","Exploitation","Credential Access","Privilege Escalation","Anti-Forensics","Exfiltration","Lateral Movement","Persistence"]);
 
-function BashAnalysisView({ events }) {
+function BashAnalysisView({ events, dateRangeMs }) {
   const [section,    setSection]    = useState("suspicious");
   const [userFilter, setUserFilter] = useState("all");
   const [search,     setSearch]     = useState("");
@@ -1464,7 +1464,7 @@ function BashAnalysisView({ events }) {
               ? <div className="tl-list">{af.map((ev, i) => <AntiForensicsCard key={i} ev={ev} />)}</div>
               : <EmptyState icon={Shield} message="No anti-forensics activity detected." />
           )}
-          {section === "frequency" && <FrequencyAnalysisPanel rawEvents={rawEvents} />}
+          {section === "frequency" && <FrequencyAnalysisPanel rawEvents={rawEvents} dateRangeMs={dateRangeMs} />}
           {section === "profile" && (
             profiles.length > 0
               ? <div className="tl-list">{profiles.map((ev, i) => <ActivityProfileCard key={i} ev={ev} />)}</div>
@@ -1511,11 +1511,13 @@ function classifyCmd(cmdStr) {
 }
 
 // ── Frequency Analysis Panel ──────────────────────────────────────────────────
-function FrequencyAnalysisPanel({ rawEvents }) {
+function FrequencyAnalysisPanel({ rawEvents, dateRangeMs }) {
   const [viewMode, setViewMode] = useState("command");
   const [topN,     setTopN]     = useState(20);
 
-  const allLines = rawEvents.flatMap(e => (e.data?.lines || []).map(l => ({ ...l, user: e.data?.user })));
+  const allLines = rawEvents.flatMap(e =>
+    filterBashLinesByDateRange(e.data?.lines || [], dateRangeMs).map(l => ({ ...l, user: e.data?.user }))
+  );
 
   if (!allLines.length)
     return <EmptyState icon={BarChart2} message="No command history available for frequency analysis." />;
@@ -1732,7 +1734,7 @@ function SuspiciousCommandsPanel({ events: sevs }) {
 // ── Bash History: Raw view ────────────────────────────────────────────────────
 const RH_HIGH_RISK = BH_HIGH_RISK;
 
-function BashRawView({ rawEvents }) {
+function BashRawView({ rawEvents, dateRangeMs }) {
   const [selectedUser, setSelectedUser] = useState("");
   const [catFilter,    setCatFilter]    = useState("all");
   const [showSuspOnly, setShowSuspOnly] = useState(false);
@@ -1745,9 +1747,18 @@ function BashRawView({ rawEvents }) {
   const ev         = rawEvents.find(e => e.data?.user === activeUser) || rawEvents[0];
   const lines      = ev?.data?.lines || [];
   const suspCount  = lines.filter(l => l.suspicious).length;
+  const linesInRange = filterBashLinesByDateRange(lines, dateRangeMs);
+  const orderedLines = [...linesInRange].sort((a, b) => {
+    const ta = getBashLineTimestampMs(a);
+    const tb = getBashLineTimestampMs(b);
+    if (ta != null && tb != null) return tb - ta;
+    if (ta != null) return -1;
+    if (tb != null) return 1;
+    return (b.no || 0) - (a.no || 0);
+  });
 
-  const cats = ["all", ...new Set(lines.map(l => l.category))];
-  const visible = lines.filter(l => {
+  const cats = ["all", ...new Set(orderedLines.map(l => l.category))];
+  const visible = orderedLines.filter(l => {
     if (showSuspOnly && !l.suspicious) return false;
     if (catFilter !== "all" && l.category !== catFilter) return false;
     if (histSearch && !l.cmd.toLowerCase().includes(histSearch.toLowerCase())) return false;
@@ -1774,6 +1785,11 @@ function BashRawView({ rawEvents }) {
       <div className="rh-toolbar">
         <span className="rh-stat">{lines.length} commands</span>
         <span className="rh-stat rh-stat-danger">{suspCount} suspicious</span>
+        {hasDateRange(dateRangeMs) && (
+          <span className="rh-stat" style={{ color: "#2563eb" }}>
+            {linesInRange.length} in date range
+          </span>
+        )}
         <span className="rh-stat rh-stat-muted">{ev?.data?.path}</span>
         <label className="rh-toggle">
           <input type="checkbox" checked={showSuspOnly} onChange={e => setShowSuspOnly(e.target.checked)} />
@@ -1821,7 +1837,7 @@ function BashRawView({ rawEvents }) {
 }
 
 // ── Bash History section (Analysis + Raw sub-tabs) ────────────────────────────
-function BashHistorySection({ events }) {
+function BashHistorySection({ events, dateRangeMs }) {
   const [view, setView] = useState("analysis");
   const bashEvs   = events.filter(e => e.source === "bash_history");
   const rawEvents = bashEvs.filter(e => e.event_type === "bash_history_raw");
@@ -1856,8 +1872,8 @@ function BashHistorySection({ events }) {
           <BookOpen size={12} style={{ marginRight: 5 }} />Raw History{totalCmds > 0 ? ` (${totalCmds})` : ""}
         </button>
       </div>
-      {view === "analysis" && <BashAnalysisView events={bashEvs} />}
-      {view === "raw"      && <BashRawView rawEvents={rawEvents} />}
+      {view === "analysis" && <BashAnalysisView events={bashEvs} dateRangeMs={dateRangeMs} />}
+      {view === "raw"      && <BashRawView rawEvents={rawEvents} dateRangeMs={dateRangeMs} />}
     </div>
   );
 }
@@ -1902,7 +1918,7 @@ function LogSection({ title, sources, events }) {
 }
 
 // ── Timeline Tab (source-nav + sections) ──────────────────────────────────────
-function TimelineTab({ events = [] }) {
+function TimelineTab({ events = [], dateRangeMs }) {
   const [source, setSource] = useState("bash");
 
   if (!events.length) return <EmptyState icon={Clock} message="No timeline events found." />;
@@ -1938,9 +1954,246 @@ function TimelineTab({ events = [] }) {
 
       {/* Content area */}
       <div className="tl-src-content">
-        {source === "bash"   && <BashHistorySection events={events} />}
+        {source === "bash"   && <BashHistorySection events={events} dateRangeMs={dateRangeMs} />}
         {source === "auth"   && <LogSection title="Auth Log"    sources={["auth.log","secure"]}   events={events} />}
         {source === "syslog" && <LogSection title="System Log"  sources={["syslog","messages"]}   events={events} />}
+      </div>
+    </div>
+  );
+}
+
+// ── Global date-range helpers ────────────────────────────────────────────────
+function parseDateToMs(value) {
+  if (value == null) return null;
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (value > 1e15) return Math.floor(value / 1000); // ns -> ms
+    if (value > 1e12) return Math.floor(value);         // ms epoch
+    if (value > 1e9)  return Math.floor(value * 1000);  // s epoch
+    return null;
+  }
+
+  const text = String(value).trim();
+  if (!text || text === "unknown" || text === "-") return null;
+  if (/^\d+$/.test(text)) return parseDateToMs(Number(text));
+
+  const parsed = Date.parse(text);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function hasDateRange(range) {
+  return range?.fromMs != null || range?.toMs != null;
+}
+
+function inDateRange(ts, range) {
+  // Keep undated records visible; date-range filter only excludes dated rows outside range.
+  if (ts == null) return true;
+  if (range.fromMs != null && ts < range.fromMs) return false;
+  if (range.toMs != null && ts > range.toMs) return false;
+  return true;
+}
+
+function filterByDateRange(items, getTs, range) {
+  if (!hasDateRange(range)) return items;
+  return items.filter((item) => inDateRange(getTs(item), range));
+}
+
+function getBashLineTimestampMs(line) {
+  return parseDateToMs(line?.ts)
+    ?? parseDateToMs(line?.timestamp)
+    ?? parseDateToMs(line?.datetime)
+    ?? parseDateToMs(line?.date)
+    ?? parseDateToMs(line?.unix_ts)
+    ?? parseDateToMs(line?.epoch);
+}
+
+function filterBashLinesByDateRange(lines, range) {
+  if (!hasDateRange(range)) return lines;
+  return (lines || []).filter((line) => inDateRange(getBashLineTimestampMs(line), range));
+}
+
+function filterTimelineByDateRange(events, range) {
+  if (!hasDateRange(range)) return events;
+
+  return (events || []).filter((ev) => {
+    const eventTs = parseDateToMs(ev?.timestamp);
+    if (eventTs != null) return inDateRange(eventTs, range);
+
+    if (ev?.source === "bash_history") {
+      const lines = ev?.data?.lines || [];
+      const datedLines = lines.map(getBashLineTimestampMs).filter((ts) => ts != null);
+      if (datedLines.length === 0) return true;
+      return datedLines.some((ts) => inDateRange(ts, range));
+    }
+
+    return true;
+  });
+}
+
+function getDeletedTimestampMs(item) {
+  return parseDateToMs(item?.deleted_at)
+    ?? parseDateToMs(item?.mtime)
+    ?? parseDateToMs(item?.ctime)
+    ?? parseDateToMs(item?.atime);
+}
+
+function getMultimediaTimestampMs(item) {
+  const meta = item?.metadata || {};
+  return parseDateToMs(meta.datetime_original)
+    ?? parseDateToMs(meta.date_time_original)
+    ?? parseDateToMs(meta.create_date)
+    ?? parseDateToMs(meta.modify_date)
+    ?? parseDateToMs(meta.timestamp);
+}
+
+function getBrowserRowTimestampMs(row) {
+  return parseDateToMs(row?.timestamp)
+    ?? parseDateToMs(row?.last_visit)
+    ?? parseDateToMs(row?.start_time)
+    ?? parseDateToMs(row?.date_added)
+    ?? parseDateToMs(row?.date_created)
+    ?? parseDateToMs(row?.expires);
+}
+
+function filterBrowsersByDateRange(browsers, range) {
+  if (!hasDateRange(range)) return browsers;
+
+  return browsers
+    .map((profile) => {
+      const next = {
+        ...profile,
+        history:      filterByDateRange(profile.history || [], getBrowserRowTimestampMs, range),
+        downloads:    filterByDateRange(profile.downloads || [], getBrowserRowTimestampMs, range),
+        bookmarks:    filterByDateRange(profile.bookmarks || [], getBrowserRowTimestampMs, range),
+        cookies:      filterByDateRange(profile.cookies || [], getBrowserRowTimestampMs, range),
+        extensions:   filterByDateRange(profile.extensions || [], getBrowserRowTimestampMs, range),
+        logins:       filterByDateRange(profile.logins || [], getBrowserRowTimestampMs, range),
+        search_terms: filterByDateRange(profile.search_terms || [], getBrowserRowTimestampMs, range),
+        autofill:     filterByDateRange(profile.autofill || [], getBrowserRowTimestampMs, range),
+      };
+
+      const total =
+        next.history.length + next.downloads.length + next.bookmarks.length + next.cookies.length +
+        next.extensions.length + next.logins.length + next.search_terms.length + next.autofill.length;
+      return total > 0 ? next : null;
+    })
+    .filter(Boolean);
+}
+
+function buildRecentActivities({ timeline, deleted, browsers, multimedia }) {
+  const rows = [];
+
+  for (const ev of timeline || []) {
+    const ts = parseDateToMs(ev.timestamp);
+    if (ts == null) continue;
+    rows.push({
+      timeMs: ts,
+      timeText: ev.timestamp,
+      section: "Timeline",
+      severity: ev.severity || "info",
+      detail: ev.detail,
+      source: ev.source,
+      path: ev.data?.path || "",
+    });
+  }
+
+  for (const d of deleted || []) {
+    const ts = getDeletedTimestampMs(d);
+    if (ts == null) continue;
+    rows.push({
+      timeMs: ts,
+      timeText: d.deleted_at || d.mtime || d.ctime || d.atime || "",
+      section: "Deleted",
+      severity: d.severity || "medium",
+      detail: d.detail || d.path,
+      source: d.type || "deleted",
+      path: d.path || "",
+    });
+  }
+
+  for (const profile of browsers || []) {
+    const browser = profile.browser_label || profile.browser || "browser";
+    for (const h of profile.history || []) {
+      const ts = getBrowserRowTimestampMs(h);
+      if (ts == null) continue;
+      rows.push({
+        timeMs: ts,
+        timeText: h.last_visit || "",
+        section: "Browser",
+        severity: h.severity || "info",
+        detail: h.title || h.url || "Visited URL",
+        source: `${browser} history`,
+        path: h.url || "",
+      });
+    }
+    for (const dl of profile.downloads || []) {
+      const ts = getBrowserRowTimestampMs(dl);
+      if (ts == null) continue;
+      rows.push({
+        timeMs: ts,
+        timeText: dl.start_time || "",
+        section: "Browser",
+        severity: dl.severity || "info",
+        detail: dl.target_path || dl.url || "Download",
+        source: `${browser} download`,
+        path: dl.target_path || dl.url || "",
+      });
+    }
+    for (const s of profile.search_terms || []) {
+      const ts = getBrowserRowTimestampMs(s);
+      if (ts == null) continue;
+      rows.push({
+        timeMs: ts,
+        timeText: s.timestamp || "",
+        section: "Browser",
+        severity: s.severity || "info",
+        detail: s.term ? `Search: ${s.term}` : "Search activity",
+        source: `${browser} search`,
+        path: "",
+      });
+    }
+  }
+
+  for (const m of multimedia || []) {
+    const ts = getMultimediaTimestampMs(m);
+    if (ts == null) continue;
+    rows.push({
+      timeMs: ts,
+      timeText: m.metadata?.datetime_original || m.metadata?.create_date || "",
+      section: "Multimedia",
+      severity: m.severity || "info",
+      detail: (m.findings && m.findings[0]) || m.name || m.path,
+      source: m.media_type || "media",
+      path: m.path || "",
+    });
+  }
+
+  return rows.sort((a, b) => b.timeMs - a.timeMs).slice(0, 200);
+}
+
+function RecentActivitiesTab({ activities = [] }) {
+  if (!activities.length) {
+    return <EmptyState icon={Activity} message="No recent activities in the selected date range." />;
+  }
+
+  return (
+    <div className="tab-content">
+      <div className="ra-summary">Showing {activities.length} most recent timestamped activities.</div>
+      <div className="ra-list">
+        {activities.map((row, i) => (
+          <div key={`${row.section}-${row.source}-${row.timeMs}-${i}`} className="ra-row" style={{ borderLeftColor: SEV_COLOR[row.severity] || "#6b7280" }}>
+            <div className="ra-time">{row.timeText || new Date(row.timeMs).toLocaleString()}</div>
+            <div className="ra-main">
+              <div className="ra-head">
+                <span className="ra-section">{row.section}</span>
+                <span className="ra-source">{row.source}</span>
+                <SevBadge sev={row.severity} />
+              </div>
+              <div className="ra-detail">{row.detail}</div>
+              {row.path && <code className="ra-path">{row.path}</code>}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -3515,6 +3768,7 @@ function MultimediaTab({ findings = [], imgPath }) {
 const REPORT_TABS = [
   { id: "summary",     label: "Summary",     Icon: HardDrive },
   { id: "timeline",    label: "Timeline",    Icon: Clock     },
+  { id: "recent",      label: "Recent",      Icon: Activity  },
   { id: "deleted",     label: "Deleted",     Icon: Eye       },
   { id: "persistence", label: "Persistence", Icon: Shield    },
   { id: "config",      label: "Config",      Icon: Settings  },
@@ -3526,16 +3780,72 @@ const REPORT_TABS = [
 
 function ReportPanel({ report, liveInfo, imgPath, onClear, onExport, onReanalyze, reanalyzing }) {
   const [tab, setTab] = useState("summary");
+  const [dateRangeDraft, setDateRangeDraft] = useState({ from: "", to: "" });
+  const [dateRangeApplied, setDateRangeApplied] = useState({ from: "", to: "" });
   const { summary } = report;
   const isLive = !!liveInfo;
+
+  const rangeMs = useMemo(() => {
+    const fromMs = dateRangeApplied.from ? parseDateToMs(dateRangeApplied.from) : null;
+    const toMs = dateRangeApplied.to ? parseDateToMs(dateRangeApplied.to) : null;
+    return { fromMs, toMs };
+  }, [dateRangeApplied]);
+
+  const hasRange = hasDateRange(rangeMs);
+  const draftHasRange = !!dateRangeDraft.from || !!dateRangeDraft.to;
+  const hasPendingDateChanges =
+    dateRangeDraft.from !== dateRangeApplied.from || dateRangeDraft.to !== dateRangeApplied.to;
+
+  const filteredTimeline = useMemo(
+    () => filterTimelineByDateRange(report.timeline || [], rangeMs),
+    [report.timeline, rangeMs]
+  );
+
+  const filteredDeleted = useMemo(
+    () => filterByDateRange(report.deleted || [], getDeletedTimestampMs, rangeMs),
+    [report.deleted, rangeMs]
+  );
+
+  const filteredBrowsers = useMemo(
+    () => filterBrowsersByDateRange(report.browsers || [], rangeMs),
+    [report.browsers, rangeMs]
+  );
+
+  const filteredMultimedia = useMemo(
+    () => filterByDateRange(report.multimedia || [], getMultimediaTimestampMs, rangeMs),
+    [report.multimedia, rangeMs]
+  );
+
+  const recentActivities = useMemo(
+    () => buildRecentActivities({
+      timeline: filteredTimeline,
+      deleted: filteredDeleted,
+      browsers: filteredBrowsers,
+      multimedia: filteredMultimedia,
+    }),
+    [filteredTimeline, filteredDeleted, filteredBrowsers, filteredMultimedia]
+  );
+
+  const highTimelineFiltered = filteredTimeline.filter((e) => e.severity === "high" || e.severity === "critical").length;
+  const highDeletedFiltered = filteredDeleted.filter((e) => e.severity === "high" || e.severity === "critical").length;
+  const highBrowserFiltered = filteredBrowsers.reduce(
+    (acc, p) => acc + [
+      ...(p.history || []), ...(p.downloads || []), ...(p.bookmarks || []), ...(p.cookies || []),
+      ...(p.extensions || []), ...(p.logins || []), ...(p.search_terms || []), ...(p.autofill || []),
+    ].filter((x) => x.severity === "high" || x.severity === "critical").length,
+    0
+  );
+  const highMediaFiltered = filteredMultimedia.filter((m) => m.severity === "high" || m.severity === "critical").length;
+
   const badge = {
-    timeline:    summary?.high_timeline    > 0 ? summary.high_timeline    : null,
-    deleted:     summary?.high_deleted     > 0 ? summary.high_deleted     : null,
+    timeline:    highTimelineFiltered > 0 ? highTimelineFiltered : null,
+    recent:      recentActivities.length > 0 ? recentActivities.length : null,
+    deleted:     highDeletedFiltered > 0 ? highDeletedFiltered : null,
     persistence: summary?.high_persistence > 0 ? summary.high_persistence : null,
     config:      summary?.high_config      > 0 ? summary.high_config      : null,
     services:    summary?.high_services    > 0 ? summary.high_services    : null,
-    browsers:    summary?.high_browsers    > 0 ? summary.high_browsers    : null,
-    multimedia:  summary?.high_multimedia  > 0 ? summary.high_multimedia  : null,
+    browsers:    highBrowserFiltered > 0 ? highBrowserFiltered : null,
+    multimedia:  highMediaFiltered > 0 ? highMediaFiltered : null,
     tools:       summary?.high_risk_tools  > 0 ? summary.high_risk_tools  : null,
   };
   return (
@@ -3566,15 +3876,57 @@ function ReportPanel({ report, liveInfo, imgPath, onClear, onExport, onReanalyze
           </button>
         ))}
       </div>
+      <div className="report-global-filter">
+        <div className="rgf-left">
+          <Filter size={12} />
+          <span className="rgf-label">Global Date Range</span>
+          <input
+            className="rgf-input"
+            type="datetime-local"
+            value={dateRangeDraft.from}
+            onChange={(e) => setDateRangeDraft((s) => ({ ...s, from: e.target.value }))}
+          />
+          <span className="rgf-sep">to</span>
+          <input
+            className="rgf-input"
+            type="datetime-local"
+            value={dateRangeDraft.to}
+            onChange={(e) => setDateRangeDraft((s) => ({ ...s, to: e.target.value }))}
+          />
+          <button
+            className="btn-primary btn-sm"
+            onClick={() => setDateRangeApplied(dateRangeDraft)}
+            disabled={!hasPendingDateChanges}
+          >
+            Apply
+          </button>
+          <button
+            className="rgf-clear"
+            onClick={() => {
+              setDateRangeDraft({ from: "", to: "" });
+              setDateRangeApplied({ from: "", to: "" });
+            }}
+            disabled={!draftHasRange && !hasRange}
+          >
+            Clear
+          </button>
+        </div>
+        {hasRange && (
+          <div className="rgf-right">
+            {filteredTimeline.length + filteredDeleted.length + filteredMultimedia.length} records in range
+          </div>
+        )}
+      </div>
       <div className="report-panel-body">
         {tab === "summary"     && <SummaryTab     report={report} liveInfo={liveInfo} />}
-        {tab === "timeline"    && <TimelineTab    events={report.timeline} />}
-        {tab === "deleted"     && <DeletedTab     findings={report.deleted} imgPath={imgPath} />}
+        {tab === "timeline"    && <TimelineTab    events={filteredTimeline} dateRangeMs={rangeMs} />}
+        {tab === "recent"      && <RecentActivitiesTab activities={recentActivities} />}
+        {tab === "deleted"     && <DeletedTab     findings={filteredDeleted} imgPath={imgPath} />}
         {tab === "persistence" && <PersistenceTab findings={report.persistence} />}
         {tab === "config"      && <ConfigTab      findings={report.config} />}
         {tab === "services"    && <ServicesTab    services={report.services} />}
-        {tab === "browsers"    && <BrowserTab     browsers={report.browsers} />}
-        {tab === "multimedia"  && <MultimediaTab  findings={report.multimedia} imgPath={imgPath} />}
+        {tab === "browsers"    && <BrowserTab     browsers={filteredBrowsers} />}
+        {tab === "multimedia"  && <MultimediaTab  findings={filteredMultimedia} imgPath={imgPath} />}
         {tab === "tools"       && <ToolsTab       findings={report.findings} />}
       </div>
     </div>
