@@ -127,6 +127,16 @@ class MediaFinding(BaseModel):
     thumbnail: Optional[Dict[str, Any]] = None
 
 
+# ── Tails OS models ──────────────────────────────────────────────────────────
+
+class TailsFinding(BaseModel):
+    source: str
+    category: str
+    detail: str
+    severity: str = "info"
+    evidence: List[str] = []
+
+
 # ── Memory forensics models ───────────────────────────────────────────────────
 
 class MemoryProcess(BaseModel):
@@ -201,6 +211,7 @@ class ForensicReport(BaseModel):
     services: List[ServiceFinding] = []
     browsers: List[BrowserProfile] = []
     multimedia: List[MediaFinding] = []
+    tails: List[TailsFinding] = []
 
 
 def build_report(
@@ -213,6 +224,7 @@ def build_report(
     services: Optional[List[Dict]] = None,
     browsers: Optional[List[Dict]] = None,
     multimedia: Optional[List[Dict]] = None,
+    tails: Optional[List[Dict]] = None,
 ) -> ForensicReport:
     os_model = OSInfo(
         name=os_info.get("name"),
@@ -254,12 +266,17 @@ def build_report(
         MediaFinding(**m) for m in (multimedia or [])
     ]
 
+    tails_findings = [
+        TailsFinding(**t) for t in (tails or [])
+    ]
+
     high_timeline  = sum(1 for e in timeline_events  if e.severity == "high")
     high_deleted   = sum(1 for d in deleted_findings  if d.severity == "high")
     high_persist   = sum(1 for p in persistence_findings if p.severity == "high")
     high_config    = sum(1 for c in config_findings if c.severity in ("high", "critical"))
     high_services  = sum(1 for s in service_findings if s.severity in ("high", "critical"))
     high_multimedia = sum(1 for m in media_findings if m.severity in ("high", "critical"))
+    high_tails = sum(1 for t in tails_findings if t.severity in ("high", "critical"))
 
     summary = {
         "total_tools":         len(tool_findings),
@@ -281,7 +298,9 @@ def build_report(
         "high_browsers":       sum(1 for b in browser_profiles if b.severity in ("high", "critical")),
         "multimedia_count":    len(media_findings),
         "high_multimedia":     high_multimedia,
-        "total_high":          sum(1 for f in tool_findings if f.risk == "high") + high_timeline + high_deleted + high_persist + high_config + high_services + sum(1 for b in browser_profiles if b.severity in ("high", "critical")) + high_multimedia,
+        "tails_findings":      len(tails_findings),
+        "high_tails":          high_tails,
+        "total_high":          sum(1 for f in tool_findings if f.risk == "high") + high_timeline + high_deleted + high_persist + high_config + high_services + sum(1 for b in browser_profiles if b.severity in ("high", "critical")) + high_multimedia + high_tails,
     }
 
     return ForensicReport(
@@ -295,4 +314,5 @@ def build_report(
         services=service_findings,
         browsers=browser_profiles,
         multimedia=media_findings,
+        tails=tails_findings,
     )

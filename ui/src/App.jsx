@@ -8,6 +8,8 @@ import {
   File, Code, RefreshCw, Info, LayoutPanelLeft, BarChart2, Home,
   BookOpen, Plus, Filter, Bot, Send, Loader2, Zap,
   Image, Film, Music, MapPin, Camera, Layers, Download, Play,
+  Sailboat,
+  Usb,
 } from "lucide-react";
 
 // ─── API ──────────────────────────────────────────────────────────────────────
@@ -33,6 +35,7 @@ const apiAnalyze     = (path)       => post("/analyze",        { image_path: pat
 const apiAnalyzeLive = (scanTypes)   => post("/analyze/live",  scanTypes || {});
 const apiLiveInfo    = ()            => get("/live/info");
 const apiFsBrowse    = (path)        => post("/fs/browse",      { path });
+const apiUsbSources  = ()            => get("/fs/usb/sources");
 const apiBrowse      = (img, path)   => post("/explore/browse", { image_path: img, path });
 const apiStat        = (img, path)   => post("/explore/stat",   { image_path: img, path });
 const apiRead        = (img, path)   => post("/explore/read",   { image_path: img, path });
@@ -44,6 +47,7 @@ const apiCaseCreate  = (body)            => post("/cases", body);
 const apiCaseGet     = (id)              => get(`/cases/${id}`);
 const apiCaseDelete  = (id)              => fetch(`${API}/cases/${id}`, { method: "DELETE" }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 const apiCaseAnalyze = (caseId, imgPath) => post(`/cases/${caseId}/analyze`, { image_path: imgPath });
+const apiCaseAnalyzeTails = (caseId, imgPath) => post(`/cases/${caseId}/analyze/tails`, { image_path: imgPath });
 const apiCaseDelSrc  = (caseId, srcId)   => fetch(`${API}/cases/${caseId}/sources/${srcId}`, { method: "DELETE" }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 const apiRecover     = (img, recoveryId) => post("/deleted/recover", { image_path: img, recovery_id: recoveryId });
 const apiCarveGroups = ()                => get("/deleted/carve/groups");
@@ -73,6 +77,15 @@ const ICON_MAP = {
 function NodeIcon({ name, size = 14, style }) {
   const C = ICON_MAP[name] || File;
   return <C size={size} style={style} />;
+}
+
+function TailsLogo({ size = "md", withText = false }) {
+  return (
+    <span className={`tails-logo tails-logo-${size}`}>
+      <span className="tails-logo-mark"><Sailboat size={size === "sm" ? 10 : 12} /></span>
+      {withText && <span className="tails-logo-text">TailsOS</span>}
+    </span>
+  );
 }
 
 // ─── MODAL ────────────────────────────────────────────────────────────────────
@@ -109,6 +122,103 @@ function Modal({ title, onClose, children, width = 540 }) {
   );
 }
 
+const TAILS_CATEGORY_LABELS = {
+    environment: "Environment",
+    persistence: "Persistence",
+    tor: "Tor Activity",
+    browser: "Tor Browser",
+    usb_origin: "USB Origin",
+    memory: "Memory Artifacts",
+    hidden_service: "Hidden Service",
+    anti_forensics: "Anti-Forensics",
+    timeline: "Session Timeline",
+    misconfiguration: "Misconfiguration",
+    operational_profile: "Operational Profile",
+};
+
+function TailsTab({ findings = [], summary = {} }) {
+    const [search, setSearch] = useState("");
+    const [sev, setSev] = useState("all");
+
+    const filtered = useMemo(() => {
+      const q = search.trim().toLowerCase();
+      return (findings || []).filter((f) => {
+        if (sev !== "all" && (f.severity || "info") !== sev) return false;
+        if (!q) return true;
+        return (
+          (f.detail || "").toLowerCase().includes(q) ||
+          (f.category || "").toLowerCase().includes(q) ||
+          (f.evidence || []).some((e) => String(e).toLowerCase().includes(q))
+        );
+      });
+    }, [findings, search, sev]);
+
+    if (!findings || findings.length === 0) {
+      return (
+        <div className="tab-content">
+          <div className="empty-state">
+            <TailsLogo withText />
+            <p style={{ marginTop: 10 }}>No TailsOS-specific artifacts were detected in this source.</p>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="tab-content">
+        <div className="tails-head">
+          <div className="tails-head-title"><TailsLogo withText /> Dedicated Tails forensic indicators</div>
+          <div className="tails-head-stats">
+            <span className="tag"><AlertTriangle size={10} /> High: {summary.high_tails ?? 0}</span>
+            <span className="tag"><List size={10} /> Findings: {summary.tails_findings ?? findings.length}</span>
+          </div>
+        </div>
+
+        <div className="tails-filters">
+          <select className="mm-select" value={sev} onChange={(e) => setSev(e.target.value)}>
+            <option value="all">All severity</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="info">Info</option>
+          </select>
+          <input
+            className="mm-search"
+            type="text"
+            placeholder="Search Tails findings or evidence…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+
+        <table className="rp-table">
+          <thead>
+            <tr>
+              <th>Category</th>
+              <th>Severity</th>
+              <th>Detail</th>
+              <th>Evidence</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((f, i) => (
+              <tr key={i}>
+                <td>{TAILS_CATEGORY_LABELS[f.category] || f.category}</td>
+                <td><SevBadge sev={f.severity || "info"} /></td>
+                <td>{f.detail}</td>
+                <td>
+                  {(f.evidence || []).length === 0 ? "-" : (
+                    <ul className="evidence-list">
+                      {(f.evidence || []).slice(0, 6).map((e, j) => <li key={j}><code>{e}</code></li>)}
+                    </ul>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
 // ─── Dialogs ──────────────────────────────────────────────────────────────────
 function AnalyzeDialog({ onClose, onResult }) {
   const [path, setPath] = useState("");
@@ -3775,6 +3885,7 @@ const REPORT_TABS = [
   { id: "services",    label: "Services",    Icon: Server    },
   { id: "browsers",    label: "Browsers",    Icon: Globe     },
   { id: "multimedia",  label: "Multimedia",  Icon: Image     },
+  { id: "tails",       label: "TailsOS",     Icon: Sailboat  },
   { id: "tools",       label: "Tools",       Icon: Search    },
 ];
 
@@ -3836,6 +3947,7 @@ function ReportPanel({ report, liveInfo, imgPath, onClear, onExport, onReanalyze
     0
   );
   const highMediaFiltered = filteredMultimedia.filter((m) => m.severity === "high" || m.severity === "critical").length;
+  const highTailsFiltered = (report.tails || []).filter((t) => t.severity === "high" || t.severity === "critical").length;
 
   const badge = {
     timeline:    highTimelineFiltered > 0 ? highTimelineFiltered : null,
@@ -3846,6 +3958,7 @@ function ReportPanel({ report, liveInfo, imgPath, onClear, onExport, onReanalyze
     services:    summary?.high_services    > 0 ? summary.high_services    : null,
     browsers:    highBrowserFiltered > 0 ? highBrowserFiltered : null,
     multimedia:  highMediaFiltered > 0 ? highMediaFiltered : null,
+    tails:       highTailsFiltered > 0 ? highTailsFiltered : null,
     tools:       summary?.high_risk_tools  > 0 ? summary.high_risk_tools  : null,
   };
   return (
@@ -3927,6 +4040,7 @@ function ReportPanel({ report, liveInfo, imgPath, onClear, onExport, onReanalyze
         {tab === "services"    && <ServicesTab    services={report.services} />}
         {tab === "browsers"    && <BrowserTab     browsers={filteredBrowsers} />}
         {tab === "multimedia"  && <MultimediaTab  findings={filteredMultimedia} imgPath={imgPath} />}
+        {tab === "tails"       && <TailsTab       findings={report.tails || []} summary={summary || {}} />}
         {tab === "tools"       && <ToolsTab       findings={report.findings} />}
       </div>
     </div>
@@ -3951,12 +4065,12 @@ function NewCaseDialog({ onClose, onCreate }) {
 
   const set = (k) => (e) => setFields((f) => ({ ...f, [k]: e.target.value }));
 
-  async function submit() {
+  async function submit(mode = "normal") {
     if (!fields.name.trim()) { setErr("Case name is required."); return; }
     setLoading(true); setErr(null);
     try {
       const c = await apiCaseCreate(fields);
-      onCreate(c);
+      onCreate(c, { openAddSourceMode: mode === "tails" ? "tails" : "normal" });
       onClose();
     } catch (e) { setErr(String(e)); }
     finally { setLoading(false); }
@@ -3966,7 +4080,7 @@ function NewCaseDialog({ onClose, onCreate }) {
     <Modal title="New Forensic Case" onClose={onClose} width={520}>
       <div className="dlg-field">
         <label>Case Name *</label>
-        <input autoFocus value={fields.name} onChange={set("name")} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="e.g. Incident Response 2026-03" />
+        <input autoFocus value={fields.name} onChange={set("name")} onKeyDown={(e) => e.key === "Enter" && submit("normal")} placeholder="e.g. Incident Response 2026-03" />
       </div>
       <div className="dlg-row2">
         <div className="dlg-field">
@@ -3984,8 +4098,11 @@ function NewCaseDialog({ onClose, onCreate }) {
       </div>
       {err && <div className="dlg-error">{err}</div>}
       <div className="dlg-actions">
-        <button className="btn-primary" onClick={submit} disabled={loading || !fields.name.trim()}>
+        <button className="btn-primary" onClick={() => submit("normal")} disabled={loading || !fields.name.trim()}>
           <Plus size={14} />{loading ? "Creating…" : "Create Case"}
+        </button>
+        <button className="btn-secondary tails-btn" onClick={() => submit("tails")} disabled={loading || !fields.name.trim()}>
+          <TailsLogo size="sm" /> {loading ? "Creating…" : "Create + Analyze TailsOS"}
         </button>
         <button className="btn-secondary" onClick={onClose}>Cancel</button>
       </div>
@@ -3994,21 +4111,46 @@ function NewCaseDialog({ onClose, onCreate }) {
 }
 
 // ── AddSourceDialog ───────────────────────────────────────────────────────────
-function AddSourceDialog({ onClose, caseId, onSuccess }) {
+function AddSourceDialog({ onClose, caseId, onSuccess, preferredMode = "normal", autoDetectUsb = false }) {
   const [picking, setPicking] = useState(false);
   const [path, setPath] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loadingMode, setLoadingMode] = useState(null);
   const [err, setErr] = useState(null);
+  const [usbLoading, setUsbLoading] = useState(false);
+  const [usbErr, setUsbErr] = useState(null);
+  const [usbSources, setUsbSources] = useState([]);
 
-  async function run() {
-    if (!path) return;
-    setLoading(true); setErr(null);
+  async function detectUsb() {
+    setUsbLoading(true); setUsbErr(null);
     try {
-      const res = await apiCaseAnalyze(caseId, path);
-      onSuccess(res.source, res.report);
+      const r = await apiUsbSources();
+      setUsbSources(r.sources || []);
+      if (!path && (r.sources || []).length > 0) {
+        setPath((r.sources || [])[0].use_path || "");
+      }
+    } catch (e) {
+      setUsbErr(String(e));
+    } finally {
+      setUsbLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (autoDetectUsb) detectUsb();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoDetectUsb]);
+
+  async function run(mode = "normal") {
+    if (!path) return;
+    setLoadingMode(mode); setErr(null);
+    try {
+      const res = mode === "tails"
+        ? await apiCaseAnalyzeTails(caseId, path)
+        : await apiCaseAnalyze(caseId, path);
+      onSuccess(res.source, res.report, mode);
       onClose();
     } catch (e) { setErr(String(e)); }
-    finally { setLoading(false); }
+    finally { setLoadingMode(null); }
   }
 
   if (picking) {
@@ -4022,7 +4164,54 @@ function AddSourceDialog({ onClose, caseId, onSuccess }) {
   }
 
   return (
-    <Modal title="Add Data Source to Case" onClose={onClose} width={560}>
+    <Modal title={preferredMode === "tails" ? "Add Data Source — Analyze TailsOS" : "Add Data Source to Case"} onClose={onClose} width={640}>
+      <div className="usb-source-box">
+        <div className="usb-source-head">
+          <div className="usb-source-title"><Usb size={13} /> Add Tails USB as Source</div>
+          <button className="btn-secondary btn-sm" onClick={detectUsb} disabled={usbLoading}>
+            <RefreshCw size={12} className={usbLoading ? "spin" : ""} /> {usbLoading ? "Detecting…" : "Detect USB"}
+          </button>
+        </div>
+        {usbErr && <div className="dlg-error" style={{ marginBottom: 8 }}>{usbErr}</div>}
+        {usbSources.length === 0 && !usbLoading && (
+          <div className="usb-empty">No USB sources found. Plug in a Tails USB and click Detect USB.</div>
+        )}
+        {usbSources.length > 0 && (
+          <div className="usb-list">
+            {usbSources.map((s, idx) => (
+              <div key={`${s.device_path}-${idx}`} className="usb-row">
+                <div className="usb-row-main">
+                  <div className="usb-row-top">
+                    <code>{s.device_path}</code>
+                    {s.tails_likely && <span className="source-threat tl-high">TAILS LIKELY</span>}
+                  </div>
+                  <div className="usb-row-meta">
+                    <span>{[s.vendor, s.model].filter(Boolean).join(" ") || "USB device"}</span>
+                    <span>{s.size || ""}</span>
+                    {s.mountpoint && <span>mounted: <code>{s.mountpoint}</code></span>}
+                  </div>
+                  {(s.tails_markers || []).length > 0 && (
+                    <div className="usb-row-markers">markers: {(s.tails_markers || []).join(", ")}</div>
+                  )}
+                </div>
+                <div className="usb-row-actions">
+                  <button className="btn-secondary btn-sm" onClick={() => setPath(s.use_path || s.device_path)}>
+                    Use Path
+                  </button>
+                  <button
+                    className="btn-secondary btn-sm tails-btn"
+                    onClick={() => { setPath(s.use_path || s.device_path); run("tails"); }}
+                    disabled={!!loadingMode}
+                  >
+                    <TailsLogo size="sm" /> Add Tails USB
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="dlg-field">
         <label>Image / Mountpoint Path</label>
         <div style={{ display: "flex", gap: 8 }}>
@@ -4030,7 +4219,7 @@ function AddSourceDialog({ onClose, caseId, onSuccess }) {
             style={{ flex: 1 }}
             value={path}
             onChange={(e) => setPath(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && run()}
+            onKeyDown={(e) => e.key === "Enter" && run(preferredMode === "tails" ? "tails" : "normal")}
             placeholder="/mnt/evidence  or  /path/to/disk.img"
           />
           <button className="btn-secondary" onClick={() => setPicking(true)} title="Browse filesystem">
@@ -4041,8 +4230,20 @@ function AddSourceDialog({ onClose, caseId, onSuccess }) {
       </div>
       {err && <div className="dlg-error">{err}</div>}
       <div className="dlg-actions">
-        <button className="btn-primary" onClick={run} disabled={loading || !path}>
-          <Search size={14} />{loading ? "Analyzing…" : "Analyze & Add"}
+        <button
+          className={preferredMode === "tails" ? "btn-secondary" : "btn-primary"}
+          onClick={() => run("normal")}
+          disabled={!!loadingMode || !path}
+        >
+          <Search size={14} />{loadingMode === "normal" ? "Analyzing…" : "Analyze & Add"}
+        </button>
+        <button
+          className={preferredMode === "tails" ? "btn-primary tails-btn" : "btn-secondary tails-btn"}
+          onClick={() => run("tails")}
+          disabled={!!loadingMode || !path}
+          title="Run dedicated Tails OS artifact analysis under this case"
+        >
+          <TailsLogo size="sm" /> {loadingMode === "tails" ? "Analyzing TailsOS…" : "Analyze TailsOS"}
         </button>
         <button className="btn-secondary" onClick={onClose}>Cancel</button>
       </div>
@@ -4138,7 +4339,7 @@ function CasesView({ onOpen, onNewCase }) {
 }
 
 // ── CasePanel ─────────────────────────────────────────────────────────────────
-function CasePanel({ caseData, activeSourceId, onSelectSource, onAddSource, onDeleteSource, onBack }) {
+function CasePanel({ caseData, activeSourceId, onSelectSource, onAddSource, onAddTailsSource, onAddTailsUsbSource, onDeleteSource, onBack }) {
   const [activeTab, setActiveTab] = useState("sources");
   const { data_sources = [] } = caseData;
 
@@ -4169,6 +4370,12 @@ function CasePanel({ caseData, activeSourceId, onSelectSource, onAddSource, onDe
           </div>
         </div>
         <div style={{ marginLeft: "auto" }}>
+          <button className="btn-secondary btn-sm" onClick={onAddTailsUsbSource} title="Detect connected USB drives and add Tails source" style={{ marginRight: 8 }}>
+            <Usb size={12} /> Add Tails USB
+          </button>
+          <button className="btn-secondary btn-sm tails-btn" onClick={onAddTailsSource} title="Add source with dedicated TailsOS analysis" style={{ marginRight: 8 }}>
+            <TailsLogo size="sm" /> Analyze TailsOS
+          </button>
           <button className="btn-primary btn-sm" onClick={onAddSource}>
             <Plus size={13} /> Add Data Source
           </button>
@@ -4191,7 +4398,11 @@ function CasePanel({ caseData, activeSourceId, onSelectSource, onAddSource, onDe
             <div className="cases-empty" style={{ paddingTop: 40 }}>
               <HardDrive size={40} strokeWidth={1.2} className="cases-empty-icon" />
               <p>No data sources yet.</p>
-              <button className="btn-primary" onClick={onAddSource}><Plus size={14} /> Add Data Source</button>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn-secondary" onClick={onAddTailsUsbSource}><Usb size={12} /> Add Tails USB</button>
+                <button className="btn-secondary tails-btn" onClick={onAddTailsSource}><TailsLogo size="sm" /> Analyze TailsOS</button>
+                <button className="btn-primary" onClick={onAddSource}><Plus size={14} /> Add Data Source</button>
+              </div>
             </div>
           ) : (
             <div className="source-list">
@@ -4688,14 +4899,15 @@ export default function App() {
     }
   }
 
-  function handleSourceAdded(updatedCase, source, rpt) {
+  function handleSourceAdded(updatedCase, source, rpt, mode = "normal") {
     setActiveCase(updatedCase);
     setReport(rpt);
     setImgPath(source.path);
     setActiveSrcId(source.id);
     setView("report");
     const hi = rpt.summary?.total_high ?? 0;
-    setStatus(`Source added to "${updatedCase.name}" — ${hi} high-severity indicator${hi !== 1 ? "s" : ""}`);
+    const modeText = mode === "tails" ? "TailsOS analysis" : "analysis";
+    setStatus(`Source added to "${updatedCase.name}" (${modeText}) — ${hi} high-severity indicator${hi !== 1 ? "s" : ""}`);
   }
 
   function selectSource(src) {
@@ -4794,6 +5006,8 @@ export default function App() {
               activeSourceId={activeSrcId}
               onSelectSource={selectSource}
               onAddSource={() => setDialog("add_source")}
+              onAddTailsSource={() => setDialog("add_source_tails")}
+              onAddTailsUsbSource={() => setDialog("add_source_tails_usb")}
               onDeleteSource={async (srcId) => {
                 try {
                   await apiCaseDelSrc(activeCase.id, srcId);
@@ -4835,15 +5049,42 @@ export default function App() {
       {dialog === "new_case"   && (
         <NewCaseDialog
           onClose={closeDialog}
-          onCreate={(c) => { setActiveCase(c); setView("case"); }}
+          onCreate={(c, options) => {
+            setActiveCase(c);
+            setView("case");
+            if (options?.openAddSourceMode === "tails") setDialog("add_source_tails");
+          }}
         />
       )}
       {dialog === "add_source" && activeCase && (
         <AddSourceDialog
           onClose={closeDialog}
           caseId={activeCase.id}
-          onSuccess={async (source, rpt) => {
-            try { const updated = await apiCaseGet(activeCase.id); handleSourceAdded(updated, source, rpt); }
+          onSuccess={async (source, rpt, mode) => {
+            try { const updated = await apiCaseGet(activeCase.id); handleSourceAdded(updated, source, rpt, mode); }
+            catch (e) { setStatus("Case update failed: " + String(e)); }
+          }}
+        />
+      )}
+      {dialog === "add_source_tails" && activeCase && (
+        <AddSourceDialog
+          onClose={closeDialog}
+          caseId={activeCase.id}
+          preferredMode="tails"
+          onSuccess={async (source, rpt, mode) => {
+            try { const updated = await apiCaseGet(activeCase.id); handleSourceAdded(updated, source, rpt, mode); }
+            catch (e) { setStatus("Case update failed: " + String(e)); }
+          }}
+        />
+      )}
+      {dialog === "add_source_tails_usb" && activeCase && (
+        <AddSourceDialog
+          onClose={closeDialog}
+          caseId={activeCase.id}
+          preferredMode="tails"
+          autoDetectUsb={true}
+          onSuccess={async (source, rpt, mode) => {
+            try { const updated = await apiCaseGet(activeCase.id); handleSourceAdded(updated, source, rpt, mode); }
             catch (e) { setStatus("Case update failed: " + String(e)); }
           }}
         />

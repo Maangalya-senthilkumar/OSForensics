@@ -15,6 +15,8 @@ Extended endpoints:
   POST /services          – service detection and enumeration for a given path
   POST /browsers          – browser forensics (history, bookmarks, cookies, extensions …)
   POST /multimedia        – multimedia forensics (EXIF, GPS, steganography, tampering …)
+    POST /analyze/tails     – full analysis with dedicated Tails OS heuristics
+    POST /cases/{id}/analyze/tails – same as above but saved under a case source
 
 Explorer endpoints (Autopsy-style navigation):
   POST /explore/tree      – static artifact category tree
@@ -27,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import traceback
 from typing import Optional
@@ -55,6 +58,7 @@ from .multimedia import analyze_multimedia, ALL_MEDIA_EXTS, EXT_TO_MIME
 from .persistence import detect_persistence
 from .report import build_report
 from .services import detect_services
+from .tails import analyze_tails
 from .timeline import build_timeline
 
 
@@ -96,7 +100,7 @@ app.add_middleware(
 
 # ── Shared helper ─────────────────────────────────────────────────────────────
 
-def _full_analysis(fs: FilesystemAccessor) -> dict:
+def _full_analysis(fs: FilesystemAccessor, tails_focus: bool = False) -> dict:
     os_info    = detect_os(fs)
     findings   = detect_tools(fs)
     classified = classify_findings(findings)
@@ -107,10 +111,14 @@ def _full_analysis(fs: FilesystemAccessor) -> dict:
     services   = detect_services(fs)
     browsers   = detect_browsers(fs)
     multimedia = analyze_multimedia(fs)
+    tails      = analyze_tails(fs, tool_findings=classified)
     report = build_report(os_info, classified, timeline=timeline, deleted=deleted,
                           persistence=persistence, config=config, services=services,
-                          browsers=browsers, multimedia=multimedia)
-    return report.dict()
+                          browsers=browsers, multimedia=multimedia, tails=tails)
+    out = report.dict()
+    if tails_focus:
+        out.setdefault("summary", {})["analysis_mode"] = "tails_os"
+    return out
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -124,6 +132,19 @@ def analyze(req: AnalyzeRequest):
         raise HTTPException(status_code=400, detail=str(e))
     try:
         return _full_analysis(fs)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": str(e), "trace": traceback.format_exc()})
+
+
+@app.post("/analyze/tails")
+def analyze_tails_os(req: AnalyzeRequest):
+    """Run full analysis with explicit Tails-focused heuristics enabled."""
+    try:
+        fs = FilesystemAccessor(req.image_path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        return _full_analysis(fs, tails_focus=True)
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": str(e), "trace": traceback.format_exc()})
 
@@ -585,6 +606,99 @@ def fs_browse(req: FsBrowseRequest):
     return {"path": path, "children": children, "breadcrumbs": crumbs}
 
 
+@app.get("/fs/usb/sources")
+def fs_usb_sources():
+    """Return USB block device candidates, prioritizing Tails-like media.
+
+    Each candidate includes:
+      - device_path (/dev/sdX1)
+      - mountpoint (if mounted)
+      - use_path (mountpoint when available, else device path)
+      - tails_score / tails_markers (best-effort local checks)
+    """
+    try:
+        res = subprocess.run(
+            ["lsblk", "-J", "-o", "NAME,PATH,RM,TYPE,MOUNTPOINT,FSTYPE,SIZE,MODEL,VENDOR,TRAN,LABEL"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+        if res.returncode != 0:
+            raise RuntimeError(res.stderr.strip() or "lsblk failed")
+        data = json.loads(res.stdout or "{}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to enumerate USB sources: {e}")
+
+    items = []
+
+    def _score_mount(mountpoint: Optional[str]) -> tuple[int, list[str]]:
+        if not mountpoint or not os.path.isdir(mountpoint):
+            return 0, []
+        markers = []
+        checks = [
+            ("live", os.path.join(mountpoint, "live")),
+            ("tails_amnesia", os.path.join(mountpoint, "etc", "amnesia")),
+            ("tails_persistence", os.path.join(mountpoint, "live", "persistence")),
+            ("squashfs", os.path.join(mountpoint, "live", "filesystem.squashfs")),
+            ("boot_live", os.path.join(mountpoint, "boot")),
+        ]
+        score = 0
+        for label, p in checks:
+            if os.path.exists(p):
+                markers.append(label)
+                score += 1
+        return score, markers
+
+    def _walk(node: dict, parent_usb: bool = False):
+        dev_path = node.get("path") or ""
+        rm = int(node.get("rm") or 0)
+        tran = str(node.get("tran") or "").lower()
+        typ = str(node.get("type") or "")
+        is_usb = parent_usb or tran == "usb" or rm == 1
+
+        mountpoint = node.get("mountpoint") or ""
+        model = (node.get("model") or "").strip()
+        vendor = (node.get("vendor") or "").strip()
+        label = (node.get("label") or "").strip()
+
+        if is_usb and typ in ("disk", "part") and dev_path.startswith("/dev/"):
+            tails_score, tails_markers = _score_mount(mountpoint if mountpoint else None)
+            items.append(
+                {
+                    "device_name": node.get("name") or "",
+                    "device_path": dev_path,
+                    "mountpoint": mountpoint or None,
+                    "use_path": mountpoint or dev_path,
+                    "type": typ,
+                    "size": node.get("size") or "",
+                    "fstype": node.get("fstype") or "",
+                    "vendor": vendor,
+                    "model": model,
+                    "label": label,
+                    "transport": tran,
+                    "tails_score": tails_score,
+                    "tails_markers": tails_markers,
+                    "tails_likely": tails_score >= 2,
+                }
+            )
+
+        for ch in node.get("children") or []:
+            _walk(ch, parent_usb=is_usb)
+
+    for n in data.get("blockdevices") or []:
+        _walk(n)
+
+    # Prefer mounted partitions and likely-Tails sources first.
+    items.sort(
+        key=lambda x: (
+            0 if x.get("mountpoint") else 1,
+            -(x.get("tails_score") or 0),
+            x.get("device_path") or "",
+        )
+    )
+    return {"sources": items}
+
+
 # ── Case management models ────────────────────────────────────────────────────
 
 class CaseCreate(BaseModel):
@@ -673,6 +787,31 @@ def cases_analyze(case_id: str, req: CaseAnalyzeRequest):
     try:
         report = _full_analysis(fs)
         label  = os.path.basename(req.image_path.rstrip("/")) or req.image_path
+        source = add_data_source(case_id, req.image_path, label, report)
+        return {"source": source, "report": report}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": str(e), "trace": traceback.format_exc()})
+
+
+@app.post("/cases/{case_id}/analyze/tails")
+def cases_analyze_tails(case_id: str, req: CaseAnalyzeRequest):
+    """Run Tails-focused analysis and save the result as a data source in the case."""
+    try:
+        get_case(case_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        fs = FilesystemAccessor(req.image_path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        report = _full_analysis(fs, tails_focus=True)
+        label_base = os.path.basename(req.image_path.rstrip("/")) or req.image_path
+        label = f"{label_base} (TailsOS)"
         source = add_data_source(case_id, req.image_path, label, report)
         return {"source": source, "report": report}
     except Exception as e:
