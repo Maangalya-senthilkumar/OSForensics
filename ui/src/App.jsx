@@ -48,6 +48,7 @@ const apiCaseGet     = (id)              => get(`/cases/${id}`);
 const apiCaseDelete  = (id)              => fetch(`${API}/cases/${id}`, { method: "DELETE" }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 const apiCaseAnalyze = (caseId, imgPath) => post(`/cases/${caseId}/analyze`, { image_path: imgPath });
 const apiCaseAnalyzeTails = (caseId, imgPath) => post(`/cases/${caseId}/analyze/tails`, { image_path: imgPath });
+const apiCaseAnalyzeLive = (caseId, scanTypes) => post(`/cases/${caseId}/analyze/live`, scanTypes || {});
 const apiCaseDelSrc  = (caseId, srcId)   => fetch(`${API}/cases/${caseId}/sources/${srcId}`, { method: "DELETE" }).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 const apiRecover     = (img, recoveryId) => post("/deleted/recover", { image_path: img, recovery_id: recoveryId });
 const apiCarveGroups = ()                => get("/deleted/carve/groups");
@@ -262,7 +263,7 @@ const SCAN_TYPES = [
   { key: "multimedia",  label: "Multimedia",        hint: "Image / video / audio metadata (slow)",        default: false },
 ];
 
-function LiveScanDialog({ onClose, onResult }) {
+function LiveScanDialog({ onClose, onResult, runScan, title = "Scan Live System" }) {
   const defaults = Object.fromEntries(SCAN_TYPES.map(t => [t.key, t.default]));
   const [types,   setTypes]   = useState(defaults);
   const [loading, setLoading] = useState(false);
@@ -274,8 +275,10 @@ function LiveScanDialog({ onClose, onResult }) {
   async function run() {
     setLoading(true); setErr(null);
     try {
-      const [info, r] = await Promise.all([apiLiveInfo(), apiAnalyzeLive(types)]);
-      onResult(r, "/", info);
+      const result = runScan
+        ? await runScan(types)
+        : (() => Promise.all([apiLiveInfo(), apiAnalyzeLive(types)]).then(([info, report]) => ({ info, report, path: "/" })))();
+      onResult(result.report, result.path || "/", result.info, result.source || null);
       onClose();
     } catch (e) {
       setErr(String(e));
@@ -285,7 +288,7 @@ function LiveScanDialog({ onClose, onResult }) {
   }
 
   return (
-    <Modal title="Scan Live System" onClose={onClose} width={440}>
+    <Modal title={title} onClose={onClose} width={440}>
       <div className="lsd-body">
         <p className="lsd-intro">
           <Cpu size={13} /> Scanning <strong>/</strong> — select which analysis modules to run:
@@ -4339,7 +4342,7 @@ function CasesView({ onOpen, onNewCase }) {
 }
 
 // ── CasePanel ─────────────────────────────────────────────────────────────────
-function CasePanel({ caseData, activeSourceId, onSelectSource, onAddSource, onAddTailsSource, onAddTailsUsbSource, onDeleteSource, onBack }) {
+function CasePanel({ caseData, activeSourceId, onSelectSource, onAddSource, onAddTailsSource, onAddTailsUsbSource, onScanLiveToCase, onDeleteSource, onBack }) {
   const [activeTab, setActiveTab] = useState("sources");
   const { data_sources = [] } = caseData;
 
@@ -4370,6 +4373,9 @@ function CasePanel({ caseData, activeSourceId, onSelectSource, onAddSource, onAd
           </div>
         </div>
         <div style={{ marginLeft: "auto" }}>
+          <button className="btn-secondary btn-sm" onClick={onScanLiveToCase} title="Scan current live machine and save findings under this case" style={{ marginRight: 8 }}>
+            <Cpu size={12} /> Scan Live to Case
+          </button>
           <button className="btn-secondary btn-sm" onClick={onAddTailsUsbSource} title="Detect connected USB drives and add Tails source" style={{ marginRight: 8 }}>
             <Usb size={12} /> Add Tails USB
           </button>
@@ -4399,6 +4405,7 @@ function CasePanel({ caseData, activeSourceId, onSelectSource, onAddSource, onAd
               <HardDrive size={40} strokeWidth={1.2} className="cases-empty-icon" />
               <p>No data sources yet.</p>
               <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn-secondary" onClick={onScanLiveToCase}><Cpu size={12} /> Scan Live to Case</button>
                 <button className="btn-secondary" onClick={onAddTailsUsbSource}><Usb size={12} /> Add Tails USB</button>
                 <button className="btn-secondary tails-btn" onClick={onAddTailsSource}><TailsLogo size="sm" /> Analyze TailsOS</button>
                 <button className="btn-primary" onClick={onAddSource}><Plus size={14} /> Add Data Source</button>
@@ -4906,7 +4913,7 @@ export default function App() {
     setActiveSrcId(source.id);
     setView("report");
     const hi = rpt.summary?.total_high ?? 0;
-    const modeText = mode === "tails" ? "TailsOS analysis" : "analysis";
+    const modeText = mode === "tails" ? "TailsOS analysis" : mode === "live" ? "live scan" : "analysis";
     setStatus(`Source added to "${updatedCase.name}" (${modeText}) — ${hi} high-severity indicator${hi !== 1 ? "s" : ""}`);
   }
 
@@ -5008,6 +5015,7 @@ export default function App() {
               onAddSource={() => setDialog("add_source")}
               onAddTailsSource={() => setDialog("add_source_tails")}
               onAddTailsUsbSource={() => setDialog("add_source_tails_usb")}
+              onScanLiveToCase={() => setDialog("live_scan_case")}
               onDeleteSource={async (srcId) => {
                 try {
                   await apiCaseDelSrc(activeCase.id, srcId);
@@ -5044,6 +5052,34 @@ export default function App() {
         <LiveScanDialog
           onClose={closeDialog}
           onResult={(r, path, info) => { handleResult(r, path); setLiveInfo(info); closeDialog(); }}
+        />
+      )}
+      {dialog === "live_scan_case" && activeCase && (
+        <LiveScanDialog
+          title={`Scan Live System to Case: ${activeCase.name}`}
+          onClose={closeDialog}
+          runScan={async (types) => {
+            const [info, saved] = await Promise.all([
+              apiLiveInfo(),
+              apiCaseAnalyzeLive(activeCase.id, types),
+            ]);
+            return {
+              info,
+              report: saved.report,
+              path: "/",
+              source: saved.source,
+            };
+          }}
+          onResult={async (r, path, info, source) => {
+            try {
+              const updated = await apiCaseGet(activeCase.id);
+              setLiveInfo(info || null);
+              if (source) handleSourceAdded(updated, source, r, "live");
+              else handleResult(r, path || "/");
+            } catch (e) {
+              setStatus("Case update failed: " + String(e));
+            }
+          }}
         />
       )}
       {dialog === "new_case"   && (

@@ -26,6 +26,7 @@ Explorer endpoints (Autopsy-style navigation):
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import os
 import shutil
@@ -118,6 +119,28 @@ def _full_analysis(fs: FilesystemAccessor, tails_focus: bool = False) -> dict:
     out = report.dict()
     if tails_focus:
         out.setdefault("summary", {})["analysis_mode"] = "tails_os"
+    return out
+
+
+def _live_analysis(req: "LiveScanRequest") -> dict:
+    """Run analysis against the current live host with scan-type flags."""
+    fs = FilesystemAccessor("/")
+    os_info    = detect_os(fs)
+    findings   = detect_tools(fs)
+    classified = classify_findings(findings)
+    timeline    = build_timeline(fs)       if req.timeline    else []
+    deleted     = detect_deleted(fs)       if req.deleted     else []
+    persistence = detect_persistence(fs)   if req.persistence else []
+    config      = analyze_configs(fs)      if req.config      else []
+    services    = detect_services(fs)      if req.services    else []
+    browsers    = detect_browsers(fs)      if req.browsers    else []
+    multimedia  = analyze_multimedia(fs)   if req.multimedia  else []
+    tails       = analyze_tails(fs, tool_findings=classified)
+    report = build_report(os_info, classified, timeline=timeline, deleted=deleted,
+                          persistence=persistence, config=config, services=services,
+                          browsers=browsers, multimedia=multimedia, tails=tails)
+    out = report.dict()
+    out.setdefault("summary", {})["analysis_mode"] = "live_system"
     return out
 
 
@@ -489,24 +512,7 @@ def analyze_live(req: LiveScanRequest = None):
     if req is None:
         req = LiveScanRequest()
     try:
-        fs = FilesystemAccessor("/")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    try:
-        os_info    = detect_os(fs)
-        findings   = detect_tools(fs)
-        classified = classify_findings(findings)
-        timeline    = build_timeline(fs)       if req.timeline    else []
-        deleted     = detect_deleted(fs)       if req.deleted     else []
-        persistence = detect_persistence(fs)   if req.persistence else []
-        config      = analyze_configs(fs)      if req.config      else []
-        services    = detect_services(fs)      if req.services    else []
-        browsers    = detect_browsers(fs)      if req.browsers    else []
-        multimedia  = analyze_multimedia(fs)   if req.multimedia  else []
-        report = build_report(os_info, classified, timeline=timeline, deleted=deleted,
-                              persistence=persistence, config=config, services=services,
-                              browsers=browsers, multimedia=multimedia)
-        return report.dict()
+        return _live_analysis(req)
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": str(e), "trace": traceback.format_exc()})
 
@@ -814,6 +820,30 @@ def cases_analyze_tails(case_id: str, req: CaseAnalyzeRequest):
         label = f"{label_base} (TailsOS)"
         source = add_data_source(case_id, req.image_path, label, report)
         return {"source": source, "report": report}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": str(e), "trace": traceback.format_exc()})
+
+
+@app.post("/cases/{case_id}/analyze/live")
+def cases_analyze_live(case_id: str, req: LiveScanRequest = None):
+    """Run live-system scan and save results under the selected case."""
+    if req is None:
+        req = LiveScanRequest()
+    try:
+        get_case(case_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        report = _live_analysis(req)
+        info = live_info()
+        host = info.get("hostname") or "live-host"
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+        label = f"Live System ({host}) [{ts}]"
+        source = add_data_source(case_id, "/", label, report)
+        return {"source": source, "report": report, "live_info": info}
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": str(e), "trace": traceback.format_exc()})
 
