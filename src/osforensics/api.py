@@ -36,7 +36,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-
+from .memory import analyze_memory
 from . import agent_memory
 from .agent_core import get_agent
 
@@ -81,6 +81,8 @@ class CarveRequest(BaseModel):
     max_files: int = 200
     max_scan_gb: float = 2.0            # scan ceiling in GB
 
+class MemoryRequest(BaseModel):
+    memory_dump_path: str
 
 app = FastAPI(title="OS Forensics API")
 
@@ -584,6 +586,10 @@ def fs_browse(req: FsBrowseRequest):
 
     return {"path": path, "children": children, "breadcrumbs": crumbs}
 
+
+@app.post("/analyze-memory")
+def analyze_memory_endpoint(req: MemoryRequest):
+    return analyze_memory(req.memory_dump_path)
 
 # ── Case management models ────────────────────────────────────────────────────
 
